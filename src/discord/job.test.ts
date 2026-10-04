@@ -4,7 +4,7 @@ import { loadConfig } from "../config";
 import { createDeployPlan } from "../deploy/plan";
 import type { SessionMemoryStore } from "../memory/types";
 import { createPassThroughTelegramUpdateStore } from "../telegram/update-store";
-import { processDiscordQueueMessage, type DiscordJob } from "./job";
+import { type DiscordJob, processDiscordQueueMessage } from "./job";
 
 describe("Discord queued jobs", () => {
 	test("runs Hermes and edits the deferred interaction response", async () => {
@@ -157,6 +157,7 @@ describe("Discord queued jobs", () => {
 						repository: "codemonday-dev/lms-backend",
 						branch: "dev",
 						change: "assess checkout deploy",
+						baseRef: "main",
 					},
 					question: "assess checkout deploy",
 				},
@@ -198,6 +199,9 @@ describe("Discord queued jobs", () => {
 
 		expect(JSON.stringify(hermesInputs[0])).toContain(
 			"blast radius, side effects",
+		);
+		expect(JSON.stringify(hermesInputs[0])).toContain(
+			"compare_refs with base main and head dev",
 		);
 		const replyOptions = replies[0]?.[3] as {
 			attachment?: { filename: string; data: string };
@@ -399,6 +403,8 @@ describe("Discord queued jobs", () => {
 					});
 					return Response.json({
 						executionId: "exec-1",
+						replayed: false,
+						artifact: { id: "exec-1", status: "succeeded" },
 						statusUrl: "https://deploy.example/status/exec-1",
 					});
 				},
@@ -570,6 +576,78 @@ describe("Discord queued jobs", () => {
 
 		expect(hermesCalls).toBe(0);
 		expect(replies[0]?.[2]).toContain("database execution is disabled");
+	});
+
+	test("returns a provenance-rich JSON artifact for an allowlisted DB read", async () => {
+		const replies: unknown[][] = [];
+		await processDiscordQueueMessage(
+			{
+				body: {
+					...discordJob(),
+					interactionId: "db-job",
+					repository: undefined,
+					branch: undefined,
+					question: "SELECT id, email FROM public.users",
+					capability: {
+						kind: "database_query",
+						question: "SELECT id, email FROM public.users",
+					},
+				},
+				attempts: 1,
+				ack: () => undefined,
+				retry: () => undefined,
+			},
+			{
+				config: loadConfig({}),
+				orchestrator: { answer: async () => "must not run" },
+				databaseReadClient: {
+					query: async () => ({
+						datasource: "lms-readonly",
+						sql: "SELECT id, email FROM public.users",
+						columns: ["id", "email"],
+						rows: [{ id: 1, email: "[masked]" }],
+						rowCount: 1,
+						truncated: false,
+						durationMs: 17,
+						audit: {
+							datasource: "lms-readonly",
+							fingerprint: "q_12345678",
+							statementKind: "select",
+							referencedTables: ["public.users"],
+							parameterCount: 0,
+							limits: {
+								maxRows: 100,
+								maxBytes: 250_000,
+								timeoutMs: 5_000,
+							},
+						},
+					}),
+				},
+				discordReplyClient: {
+					reply: async (...args) => {
+						replies.push(args);
+					},
+					replyToChannel: async () => undefined,
+					sendTyping: async () => undefined,
+				},
+				discordUpdateStore: createPassThroughTelegramUpdateStore(),
+				memoryStore: memoryStore(),
+			},
+		);
+
+		expect(replies[0]?.[2]).toContain("Datasource: `lms-readonly`");
+		expect(replies[0]?.[2]).toContain("Duration: 17 ms");
+		const options = replies[0]?.[3] as {
+			attachment?: { filename: string; contentType: string; data: string };
+		};
+		expect(options.attachment?.filename).toEndWith(".json");
+		expect(options.attachment?.contentType).toContain("application/json");
+		expect(options.attachment?.data).toContain(
+			'"artifactId": "artifact_db-job"',
+		);
+		expect(options.attachment?.data).toContain(
+			'"sql": "SELECT id, email FROM public.users"',
+		);
 	});
 });
 

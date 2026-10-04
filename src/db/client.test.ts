@@ -42,6 +42,32 @@ describe("database read client", () => {
 			{ id: 2, email: "[masked]" },
 		]);
 		expect(result.truncated).toBe(true);
+		expect(result).toMatchObject({
+			datasource: "lms-readonly",
+			sql: "SELECT id, email FROM public.users WHERE id = $1",
+			durationMs: expect.any(Number),
+		});
+	});
+
+	test("rejects adapter provenance that does not match the local plan", async () => {
+		const client = createDatabaseReadClient({
+			endpoint: "https://db.example.com/v1/query",
+			token: "secret",
+			policy,
+			fetch: async () =>
+				Response.json({
+					rows: [],
+					datasource: "writer",
+					fingerprint: "q_wrong",
+				}),
+		});
+		await expect(
+			client.query({
+				sql: "SELECT id FROM public.users",
+				requestId: "job-provenance",
+				requestedBy: "discord-user",
+			}),
+		).rejects.toThrow("mismatched datasource");
 	});
 
 	test("does not call the adapter for unsafe SQL", async () => {

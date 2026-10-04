@@ -1,11 +1,12 @@
+import type { CapabilityJobStore } from "../capabilities/job-store";
 import type { AppConfig } from "../config";
 import type { CodeSourceClient } from "../telegram/code-source";
 import { isValidGitRef } from "../telegram/source-scope";
 import type { TelegramSourceSelectionStore } from "../telegram/source-selection";
 import type { TelegramUpdateStore } from "../telegram/update-store";
-import { discordSessionId, type DiscordJob, type DiscordJobQueue } from "./job";
-import type { DiscordReplyClient } from "./reply";
 import { verifyDiscordGatewayRequest } from "./gateway-signature";
+import { type DiscordJob, type DiscordJobQueue, discordSessionId } from "./job";
+import type { DiscordReplyClient } from "./reply";
 
 export type DiscordGatewayMessage = {
 	type: "message_create";
@@ -25,6 +26,7 @@ export type DiscordGatewayWebhookDeps = {
 	discordSourceSelectionStore: TelegramSourceSelectionStore;
 	discordCodeSourceClient: CodeSourceClient;
 	discordReplyClient: DiscordReplyClient;
+	capabilityJobStore?: CapabilityJobStore;
 };
 
 const maxGatewayBodyBytes = 64_000;
@@ -215,14 +217,43 @@ export async function handleDiscordGatewayMessage(
 	if (!consumed) {
 		return new Response(null, { status: 204 });
 	}
+	let deliveryChannelId = message.channelId;
+	let sourceMessageId: string | undefined = message.messageId;
+	if (deps.discordReplyClient.createThread) {
+		try {
+			const threadId = await deps.discordReplyClient.createThread(
+				message.channelId,
+				message.messageId,
+				threadName(repository, branch),
+			);
+			if (threadId) {
+				deliveryChannelId = threadId;
+				sourceMessageId = undefined;
+			}
+		} catch (error) {
+			console.warn(
+				JSON.stringify({
+					message:
+						"discord investigation thread unavailable; using source channel",
+					channelId: message.channelId,
+					error: error instanceof Error ? error.message : "unknown error",
+				}),
+			);
+		}
+	}
+	const jobSessionId = discordSessionId({
+		userId: message.userId,
+		channelId: deliveryChannelId,
+		guildId: message.guildId,
+	});
 	const job: DiscordJob = {
 		interactionId: message.messageId,
 		applicationId: deps.config.discord.applicationId,
 		userId: message.userId,
-		channelId: message.channelId,
+		channelId: deliveryChannelId,
 		guildId: message.guildId,
 		delivery: "channel",
-		sourceMessageId: message.messageId,
+		sourceMessageId,
 		action: "chat",
 		text: `repo: ${repository}\nbranch: ${branch}\n${consumed.question}`,
 		repository,
@@ -234,12 +265,28 @@ export async function handleDiscordGatewayMessage(
 			branch,
 			question: consumed.question,
 		},
-		providerSessionId: sessionId,
+		providerSessionId: jobSessionId,
 		idempotencyKey: `discord:message:${message.messageId}`,
 	};
 	const canonicalInputHash = await hashCanonicalInput(job.text);
+	if (deps.capabilityJobStore) {
+		await deps.capabilityJobStore.createJob({
+			jobId: job.interactionId,
+			capability: "code_investigation",
+			userId: job.userId,
+			guildId: job.guildId,
+			channelId: job.channelId,
+			actionDigest: canonicalInputHash,
+			objective: job.question ?? job.text,
+			metadata: {
+				delivery: "channel",
+				repository,
+				branch,
+			},
+		});
+	}
 	const claim = await deps.discordUpdateStore.claim({
-		providerSessionId: sessionId,
+		providerSessionId: jobSessionId,
 		idempotencyKey:
 			job.idempotencyKey ?? `discord:message:${message.messageId}`,
 		canonicalInputHash,
@@ -248,24 +295,33 @@ export async function handleDiscordGatewayMessage(
 	if (!claim.claimed) {
 		return accepted();
 	}
-	const queuedJob: DiscordJob = {
+	let queuedJob: DiscordJob = {
 		...job,
 		canonicalInputHash,
 		sessionSequence: claim.record?.sessionSequence,
 		generation: claim.record?.generation,
 	};
 	try {
-		await deps.discordReplyClient.replyToChannel(
-			message.channelId,
+		const progressMessageId = await deps.discordReplyClient.replyToChannel(
+			deliveryChannelId,
 			"รอสักครู่ กำลังตรวจสอบโค้ดให้ครับ...",
-			message.messageId,
+			sourceMessageId,
 		);
+		queuedJob = { ...queuedJob, progressMessageId };
 		await deps.discordJobQueue.send(queuedJob);
 	} catch (error) {
 		await deps.discordUpdateStore.release({
-			providerSessionId: sessionId,
+			providerSessionId: jobSessionId,
 			idempotencyKey: queuedJob.idempotencyKey ?? "",
 		});
+		if (deps.capabilityJobStore) {
+			await deps.capabilityJobStore.transitionJob({
+				jobId: job.interactionId,
+				from: "queued",
+				to: "failed",
+				detail: "Discord gateway queue enqueue failed",
+			});
+		}
 		console.error(
 			JSON.stringify({
 				message: "discord gateway job enqueue failed",
@@ -274,13 +330,20 @@ export async function handleDiscordGatewayMessage(
 			}),
 		);
 		await deps.discordReplyClient.replyToChannel(
-			message.channelId,
+			deliveryChannelId,
 			"ส่งงานไม่สำเร็จ กรุณา mention ผมพร้อมคำถามเพื่อเริ่มใหม่ครับ",
-			message.messageId,
+			sourceMessageId,
 		);
 		return accepted();
 	}
 	return accepted();
+}
+
+function threadName(repository: string, branch: string): string {
+	return `Javis · ${repository.split("/").at(-1) ?? repository}@${branch}`.slice(
+		0,
+		100,
+	);
 }
 
 function isGatewayMessage(value: unknown): value is DiscordGatewayMessage {

@@ -12,10 +12,13 @@ type FetchLike = (
 ) => Promise<Response>;
 
 export type DatabaseReadResult = {
+	datasource: string;
+	sql: string;
 	columns: string[];
 	rows: Record<string, unknown>[];
 	rowCount: number;
 	truncated: boolean;
+	durationMs: number;
 	audit: QueryAuditSummary;
 };
 
@@ -51,6 +54,7 @@ export function createDatabaseReadClient(input: {
 			if (endpoint.protocol !== "https:") {
 				throw new Error("Database adapter endpoint must use HTTPS");
 			}
+			const startedAt = performance.now();
 			const response = await (input.fetch ?? fetch)(endpoint, {
 				method: "POST",
 				headers: {
@@ -80,6 +84,18 @@ export function createDatabaseReadClient(input: {
 			if (!Array.isArray(raw.rows)) {
 				throw new Error("Database adapter returned an invalid response");
 			}
+			if (
+				raw.datasource !== undefined &&
+				raw.datasource !== planResult.plan.datasource
+			) {
+				throw new Error("Database adapter returned a mismatched datasource");
+			}
+			if (
+				raw.fingerprint !== undefined &&
+				raw.fingerprint !== planResult.plan.fingerprint
+			) {
+				throw new Error("Database adapter returned a mismatched fingerprint");
+			}
 			const rows = raw.rows.filter(isRow).slice(0, planResult.plan.maxRows);
 			const maskedRows = maskQueryRows(rows, planResult.plan.maskColumns);
 			const encodedBytes = new TextEncoder().encode(
@@ -89,11 +105,14 @@ export function createDatabaseReadClient(input: {
 				throw new Error("Database response exceeds the configured byte limit");
 			}
 			return {
+				datasource: planResult.plan.datasource,
+				sql: planResult.plan.sql,
 				columns: [...new Set(maskedRows.flatMap((row) => Object.keys(row)))],
 				rows: maskedRows,
 				rowCount: maskedRows.length,
 				truncated:
 					raw.rows.length > maskedRows.length || raw.truncated === true,
+				durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
 				audit: planResult.plan.audit,
 			};
 		},

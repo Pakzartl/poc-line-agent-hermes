@@ -71,4 +71,23 @@ describe("capability adapter", () => {
 		expect(response.headers.get("content-type")).toBe("image/png");
 		expect(rendered).toEqual(["https://agent.example/health"]);
 	});
+
+	test("rejects private or local artifact targets during config load", () => {
+		for (const url of [
+			"https://127.0.0.1/health",
+			"https://10.0.0.8/admin",
+			"https://169.254.169.254/latest/meta-data",
+			"https://[::1]/health",
+			"https://service.internal/health",
+		]) {
+			expect(() =>
+				loadCapabilityAdapterConfig({
+					CAPABILITY_ADAPTER_TOKEN: "a".repeat(32),
+					CAPABILITY_ARTIFACT_TARGETS_JSON: JSON.stringify([
+						{ id: "unsafe", url },
+					]),
+				}),
+			).toThrow("public HTTPS host");
+		}
+	});
 });

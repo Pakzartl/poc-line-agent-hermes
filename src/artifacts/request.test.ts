@@ -59,5 +59,16 @@ describe("artifact requests", () => {
 				JSON.stringify([{ id: "internal", url: "http://127.0.0.1:3000" }]),
 			),
 		).toThrow("credential-free HTTPS");
+		for (const url of [
+			"https://127.0.0.1/admin",
+			"https://10.0.0.1/admin",
+			"https://169.254.169.254/latest/meta-data",
+			"https://[::1]/admin",
+			"https://service.internal/admin",
+		]) {
+			expect(() =>
+				parseScreenshotTargets(JSON.stringify([{ id: "unsafe", url }])),
+			).toThrow("public HTTPS host");
+		}
 	});
 });

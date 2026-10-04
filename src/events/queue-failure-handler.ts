@@ -1,7 +1,7 @@
 import {
+	type HilArtifactV1,
 	renderHilArtifactMarkdown,
 	safeArtifactFilename,
-	type HilArtifactV1,
 } from "../capabilities/artifact";
 import type { DiscordReplyClient } from "../discord/reply";
 import type { TelegramUpdateStore } from "../telegram/update-store";
@@ -28,6 +28,7 @@ export async function handleQueueFailureEvent(
 	const result = await ingestQueueFailureEvent({
 		body,
 		signature: request.headers.get("x-javis-signature"),
+		timestamp: request.headers.get("x-javis-timestamp"),
 		secret: deps.secret,
 	});
 	if (!result.ok) {

@@ -34,7 +34,12 @@ describe("approved deploy executor", () => {
 			executorToken: "secret",
 			fetch: async (input, init) => {
 				request = new Request(input, init);
-				return Response.json({ executionId: "exec-1" });
+				return Response.json({
+					executionId: "exec-1",
+					status: "succeeded",
+					replayed: false,
+					artifact: { id: "exec-1", status: "succeeded" },
+				});
 			},
 		});
 		expect(result.executionId).toBe("exec-1");
@@ -42,6 +47,43 @@ describe("approved deploy executor", () => {
 		const body = (await request?.json()) as Record<string, unknown>;
 		expect(body.commitSha).toBe("b".repeat(40));
 		expect(body).not.toHaveProperty("command");
+	});
+
+	test("returns a failed executor artifact so callers can show rollback guidance", async () => {
+		const plan = await createDeployPlan(
+			{
+				targetId: "staging",
+				repository: "owner/repo",
+				commitSha: "d".repeat(40),
+				requestedBy: "requester",
+			},
+			targets,
+		);
+		const result = await executeApprovedDeploy({
+			plan,
+			targets,
+			approvedBy: "approver",
+			approvedDigest: plan.digest,
+			executorToken: "secret",
+			fetch: async () =>
+				Response.json(
+					{
+						executionId: "exec-failed",
+						replayed: false,
+						artifact: {
+							id: "exec-failed",
+							status: "failed",
+							rollbackGuidance: {
+								requiresSeparateApproval: true,
+								reason: "health failed",
+							},
+						},
+					},
+					{ status: 502 },
+				),
+		});
+		expect(result.status).toBe("failed");
+		expect(result.artifact.rollbackGuidance).toBeDefined();
 	});
 
 	test("blocks missing, expired, or mismatched approval", async () => {

@@ -33,7 +33,11 @@ export type ValidatedQuery = {
 };
 
 export type ValidationConfig = {
-	datasources: readonly string[];
+	datasources: readonly {
+		alias: string;
+		allowedSchemas: readonly string[];
+		allowedTables: readonly string[];
+	}[];
 	maxRows: number;
 	maxBytes: number;
 	timeoutMs: number;
@@ -68,7 +72,10 @@ export function validateDbReadRequest(
 	if (!datasourcePattern.test(datasource)) {
 		return reject(400, "datasource alias is invalid");
 	}
-	if (!config.datasources.includes(datasource)) {
+	const datasourcePolicy = config.datasources.find(
+		(item) => item.alias === datasource,
+	);
+	if (!datasourcePolicy) {
 		return reject(404, "datasource is not configured");
 	}
 	const sql = normalizeSql(stringField(record, "sql"));
@@ -81,6 +88,10 @@ export function validateDbReadRequest(
 	const sqlSafety = validateSql(sql);
 	if (sqlSafety) {
 		return reject(400, sqlSafety);
+	}
+	const tableSafety = validateTableReferences(sql, datasourcePolicy);
+	if (tableSafety) {
+		return reject(400, tableSafety);
 	}
 	const params = Array.isArray(record.params)
 		? (record.params as readonly unknown[])
@@ -168,6 +179,49 @@ function validateSql(sql: string): string | undefined {
 	return undefined;
 }
 
+function validateTableReferences(
+	sql: string,
+	policy: {
+		allowedSchemas: readonly string[];
+		allowedTables: readonly string[];
+	},
+): string | undefined {
+	const cteAliases = new Set<string>();
+	if (/^with\b/i.test(sql)) {
+		for (const match of sql.matchAll(
+			/(?:with|,)\s+([a-zA-Z_][\w]*)\s+as\s*\(/gi,
+		)) {
+			if (match[1]) cteAliases.add(match[1].toLowerCase());
+		}
+	}
+	const schemas = new Set(
+		policy.allowedSchemas.map((item) => item.toLowerCase()),
+	);
+	const tables = new Set(
+		policy.allowedTables.map((item) => item.toLowerCase()),
+	);
+	let references = 0;
+	for (const match of sql.matchAll(
+		/\b(from|join)\s+([a-zA-Z_][\w]*)(?:\.([a-zA-Z_][\w]*))?/gi,
+	)) {
+		const first = match[2] ?? "";
+		const second = match[3];
+		if (!second && cteAliases.has(first.toLowerCase())) continue;
+		references += 1;
+		if (second && !schemas.has(first.toLowerCase())) {
+			return `Schema is not allowlisted: ${first}`;
+		}
+		const table = second ?? first;
+		const fullName = second
+			? `${first}.${second}`.toLowerCase()
+			: table.toLowerCase();
+		if (!tables.has(fullName) && !tables.has(table.toLowerCase())) {
+			return `Table is not allowlisted: ${second ? `${first}.${second}` : table}`;
+		}
+	}
+	return references > 0 ? undefined : "Query must reference an allowed table";
+}
+
 function parseLimits(
 	value: unknown,
 	config: ValidationConfig,
@@ -239,8 +293,15 @@ function isSafeScalar(
 	return (
 		typeof value === "string" &&
 		value.length <= 4_000 &&
-		!/[\u0000-\u001f]/.test(value)
+		!containsControlCharacter(value)
 	);
+}
+
+function containsControlCharacter(value: string): boolean {
+	for (let index = 0; index < value.length; index += 1) {
+		if (value.charCodeAt(index) <= 0x1f) return true;
+	}
+	return false;
 }
 
 function normalizeSql(sql: string): string {

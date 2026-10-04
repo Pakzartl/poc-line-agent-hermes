@@ -23,7 +23,8 @@ describe("queue failure HTTP handler", () => {
 				email: "learner@example.com",
 			},
 		});
-		const signature = await sign(body, secret);
+		const timestamp = String(Math.floor(Date.now() / 1_000));
+		const signature = await sign(body, timestamp, secret);
 		const messages: unknown[][] = [];
 		const values = new Map<string, string>();
 		const deps = {
@@ -49,7 +50,10 @@ describe("queue failure HTTP handler", () => {
 		const request = () =>
 			new Request("https://agent.example/events/queue-failure", {
 				method: "POST",
-				headers: { "X-Javis-Signature": `sha256=${signature}` },
+				headers: {
+					"X-Javis-Timestamp": timestamp,
+					"X-Javis-Signature": `sha256=${signature}`,
+				},
 				body,
 			});
 		const first = await handleQueueFailureEvent(request(), deps);
@@ -93,9 +97,68 @@ describe("queue failure HTTP handler", () => {
 		);
 		expect(response.status).toBe(401);
 	});
+
+	test("rejects stale and tampered signed events", async () => {
+		const secret = "q".repeat(32);
+		const body = JSON.stringify({
+			version: "queue-failure/v1",
+			eventId: "evt-2",
+			queue: "email",
+			jobName: "send-certificate",
+			failedAt: new Date().toISOString(),
+			attempts: 3,
+			maxAttempts: 3,
+			error: { message: "timeout" },
+		});
+		const staleTimestamp = String(Math.floor(Date.now() / 1_000) - 600);
+		const deps = {
+			secret,
+			discordChannelId: "",
+			discordReplyClient: {
+				reply: async () => undefined,
+				replyToChannel: async () => undefined,
+				sendTyping: async () => undefined,
+			},
+			updateStore: createKvTelegramUpdateStore({
+				get: async () => null,
+				put: async () => undefined,
+				delete: async () => undefined,
+			}),
+		};
+		const stale = await handleQueueFailureEvent(
+			new Request("https://agent.example/events/queue-failure", {
+				method: "POST",
+				headers: {
+					"X-Javis-Timestamp": staleTimestamp,
+					"X-Javis-Signature": `sha256=${await sign(body, staleTimestamp, secret)}`,
+				},
+				body,
+			}),
+			deps,
+		);
+		expect(stale.status).toBe(401);
+
+		const currentTimestamp = String(Math.floor(Date.now() / 1_000));
+		const tampered = await handleQueueFailureEvent(
+			new Request("https://agent.example/events/queue-failure", {
+				method: "POST",
+				headers: {
+					"X-Javis-Timestamp": currentTimestamp,
+					"X-Javis-Signature": `sha256=${await sign(body, currentTimestamp, secret)}`,
+				},
+				body: body.replace("timeout", "forbidden"),
+			}),
+			deps,
+		);
+		expect(tampered.status).toBe(401);
+	});
 });
 
-async function sign(body: string, secret: string): Promise<string> {
+async function sign(
+	body: string,
+	timestamp: string,
+	secret: string,
+): Promise<string> {
 	const key = await crypto.subtle.importKey(
 		"raw",
 		new TextEncoder().encode(secret),
@@ -106,7 +169,7 @@ async function sign(body: string, secret: string): Promise<string> {
 	const digest = await crypto.subtle.sign(
 		"HMAC",
 		key,
-		new TextEncoder().encode(body),
+		new TextEncoder().encode(`${timestamp}.${body}`),
 	);
 	return [...new Uint8Array(digest)]
 		.map((byte) => byte.toString(16).padStart(2, "0"))

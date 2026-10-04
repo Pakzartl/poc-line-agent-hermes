@@ -1,6 +1,8 @@
 export type DbDatasourceConfig = {
 	alias: string;
 	connectionStringEnv: string;
+	allowedSchemas: readonly string[];
+	allowedTables: readonly string[];
 };
 
 export type DbAdapterConfig = {
@@ -16,6 +18,8 @@ export type DbAdapterConfig = {
 
 const datasourcePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/;
 const envNamePattern = /^[A-Z][A-Z0-9_]{0,127}$/;
+const identifierPattern = /^[a-zA-Z_][a-zA-Z0-9_]*$/;
+const tablePattern = /^(?:[a-zA-Z_][a-zA-Z0-9_]*\.)?[a-zA-Z_][a-zA-Z0-9_]*$/;
 
 export function loadDbAdapterConfig(
 	env: Readonly<Record<string, string | undefined>>,
@@ -98,8 +102,36 @@ export function parseDatasources(
 				`datasource ${alias} connectionStringEnv must be an env var name`,
 			);
 		}
-		return { alias, connectionStringEnv };
+		const allowedSchemas = stringArray(
+			record.allowedSchemas,
+			`datasource ${alias} allowedSchemas`,
+			identifierPattern,
+		);
+		const allowedTables = stringArray(
+			record.allowedTables,
+			`datasource ${alias} allowedTables`,
+			tablePattern,
+		);
+		return { alias, connectionStringEnv, allowedSchemas, allowedTables };
 	});
+}
+
+function stringArray(value: unknown, name: string, pattern: RegExp): string[] {
+	if (!Array.isArray(value) || value.length === 0) {
+		throw new Error(`${name} must be a non-empty array`);
+	}
+	const output = value.map((item) =>
+		typeof item === "string" ? item.trim() : "",
+	);
+	if (output.some((item) => !pattern.test(item))) {
+		throw new Error(`${name} contains an invalid identifier`);
+	}
+	if (
+		new Set(output.map((item) => item.toLowerCase())).size !== output.length
+	) {
+		throw new Error(`${name} contains duplicate identifiers`);
+	}
+	return output;
 }
 
 function integerFromEnv(

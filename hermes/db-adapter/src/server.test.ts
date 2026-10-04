@@ -8,7 +8,12 @@ const config: DbAdapterConfig = {
 	port: 8789,
 	token: "b".repeat(32),
 	datasources: [
-		{ alias: "lms-readonly", connectionStringEnv: "LMS_READONLY_URL" },
+		{
+			alias: "lms-readonly",
+			connectionStringEnv: "LMS_READONLY_URL",
+			allowedSchemas: ["public"],
+			allowedTables: ["public.users"],
+		},
 	],
 	limits: { maxRows: 10, maxBytes: 10_000, timeoutMs: 2_000 },
 };
@@ -79,12 +84,37 @@ describe("db adapter", () => {
 		);
 		expect(response.status).toBe(200);
 		expect(await response.json()).toMatchObject({
+			datasource: "lms-readonly",
 			rows: [{ id: 1 }, { id: 2 }],
 			columns: ["id"],
 			rowCount: 2,
 			truncated: true,
+			durationMs: expect.any(Number),
 		});
 		expect(calls).toEqual(["SELECT id FROM public.users WHERE id = $1"]);
+	});
+
+	test("enforces datasource schema and table allowlists inside the adapter", async () => {
+		const handler = createDbAdapterHandler({
+			config,
+			execute: async () => ({ rows: [] }),
+		});
+		for (const sql of [
+			"SELECT id FROM private.users",
+			"SELECT id FROM public.payments",
+			"SELECT 1",
+		]) {
+			const response = await handler(
+				new Request("http://db.test/db/query", {
+					method: "POST",
+					headers: auth,
+					body: JSON.stringify(
+						validBody({ sql, params: [], fingerprint: fingerprintSql(sql) }),
+					),
+				}),
+			);
+			expect(response.status).toBe(400);
+		}
 	});
 
 	test("rejects writes, comments, multi statement input, and unsafe functions", async () => {

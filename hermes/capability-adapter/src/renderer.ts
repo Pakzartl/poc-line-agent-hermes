@@ -1,4 +1,8 @@
 import { rm, unlink } from "node:fs/promises";
+import {
+	assertPublicDnsResolution,
+	assertSafePublicHttpsUrl,
+} from "./url-policy";
 
 export type ScreenshotRenderer = (url: string) => Promise<Uint8Array>;
 
@@ -6,10 +10,10 @@ const screenshotTimeoutMs = 30_000;
 const maxScreenshotBytes = 7_500_000;
 
 export async function renderScreenshot(url: string): Promise<Uint8Array> {
-	const parsed = new URL(url);
-	if (parsed.protocol !== "https:" || parsed.username || parsed.password) {
-		throw new Error("screenshot URL is not a trusted HTTPS target");
-	}
+	const parsed = assertSafePublicHttpsUrl(url, "screenshot URL");
+	const addresses = await assertPublicDnsResolution(parsed);
+	const address = addresses.find((candidate) => !candidate.includes(":"));
+	const pinnedAddress = address ?? `[${addresses[0]}]`;
 	const output = `/tmp/capability-${crypto.randomUUID()}.png`;
 	const profile = `/tmp/chromium-${crypto.randomUUID()}`;
 	const chromium = Bun.spawn(
@@ -24,6 +28,7 @@ export async function renderScreenshot(url: string): Promise<Uint8Array> {
 			`--disk-cache-dir=${profile}/cache`,
 			"--window-size=1440,900",
 			"--virtual-time-budget=5000",
+			`--host-resolver-rules=MAP ${parsed.hostname} ${pinnedAddress}, MAP * ~NOTFOUND`,
 			`--screenshot=${output}`,
 			parsed.toString(),
 		],

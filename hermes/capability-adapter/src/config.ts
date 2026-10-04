@@ -1,3 +1,5 @@
+import { assertSafePublicHttpsUrl } from "./url-policy";
+
 export type ArtifactTarget = {
 	id: string;
 	url: string;
@@ -60,12 +62,10 @@ export function parseArtifactTargets(
 		if (typeof record.url !== "string") {
 			throw new Error(`artifact target ${record.id} URL is required`);
 		}
-		const url = new URL(record.url);
-		if (url.protocol !== "https:" || url.username || url.password) {
-			throw new Error(
-				`artifact target ${record.id} must use credential-free HTTPS`,
-			);
-		}
+		const url = assertSafePublicHttpsUrl(
+			record.url,
+			`artifact target ${record.id}`,
+		);
 		return { id: record.id, url: url.toString() };
 	});
 }

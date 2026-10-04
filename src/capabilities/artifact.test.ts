@@ -1,13 +1,14 @@
 import { describe, expect, test } from "bun:test";
 import {
+	type HilArtifactV1,
 	hilArtifactVersion,
 	renderHilArtifactMarkdown,
 	safeArtifactFilename,
-	type HilArtifactV1,
 } from "./artifact";
 
 const artifact: HilArtifactV1 = {
 	version: hilArtifactVersion,
+	artifactId: "artifact_test_1",
 	title: "Risk Assessment: checkout deploy",
 	capability: "risk-assessment",
 	status: "waiting_approval",
@@ -66,6 +67,7 @@ describe("HIL artifact", () => {
 		).toBe(`# Risk Assessment: checkout deploy
 
 - Version: hil-artifact/v1
+- Artifact ID: artifact_test_1
 - Capability: risk-assessment
 - Status: waiting_approval
 - Created: 2026-10-04T14:30:00.000Z

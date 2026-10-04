@@ -1,3 +1,5 @@
+import { assertSafePublicHttpsUrl } from "./url-policy";
+
 export type ArtifactKind = "markdown" | "json" | "csv" | "screenshot";
 
 export type ArtifactFile = {
@@ -89,12 +91,10 @@ export function parseScreenshotTargets(
 		if (typeof record.url !== "string") {
 			throw new Error(`Screenshot target ${index} URL is required`);
 		}
-		const url = new URL(record.url);
-		if (url.protocol !== "https:" || url.username || url.password) {
-			throw new Error(
-				`Screenshot target ${index} must use credential-free HTTPS`,
-			);
-		}
+		const url = assertSafePublicHttpsUrl(
+			record.url,
+			`Screenshot target ${index}`,
+		);
 		return { id: record.id, url: url.toString() };
 	});
 }

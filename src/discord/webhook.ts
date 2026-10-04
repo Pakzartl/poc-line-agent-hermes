@@ -1,24 +1,24 @@
+import { parseScreenshotTargets } from "../artifacts/request";
+import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
 import type { AppConfig } from "../config";
-import type { CapabilityJobStore } from "../capabilities/job-store";
-import type { CodeSourceClient } from "../telegram/code-source";
-import { parseScreenshotTargets } from "../artifacts/request";
-import { isValidGitRef, isValidRepository } from "../telegram/source-scope";
-import type { TelegramUpdateStore } from "../telegram/update-store";
 import {
 	createDeployPlan,
-	parseDeployTargets,
 	type DeployPlan,
+	parseDeployTargets,
 } from "../deploy/plan";
-import { discordSessionId, type DiscordJob, type DiscordJobQueue } from "./job";
+import type { CodeSourceClient } from "../telegram/code-source";
+import { isValidGitRef, isValidRepository } from "../telegram/source-scope";
+import type { TelegramUpdateStore } from "../telegram/update-store";
+import { type DiscordJob, type DiscordJobQueue, discordSessionId } from "./job";
 import { verifyDiscordRequest } from "./signature";
 import {
-	discordEphemeralFlag,
+	type DiscordArtifactKind,
 	type DiscordCommandOption,
 	type DiscordInteraction,
 	DiscordInteractionResponseType,
 	DiscordInteractionType,
-	type DiscordArtifactKind,
+	discordEphemeralFlag,
 } from "./types";
 
 export type DiscordWebhookDeps = {
@@ -77,6 +77,12 @@ export async function handleDiscordInteraction(
 		return ephemeralResponse("You are not authorized to use this agent.");
 	}
 	if (
+		interaction.guild_id &&
+		!deps.config.discord.allowedGuildIds.includes(interaction.guild_id)
+	) {
+		return ephemeralResponse("This Discord server is not authorized.");
+	}
+	if (
 		interaction.type === DiscordInteractionType.applicationCommandAutocomplete
 	) {
 		return handleAutocomplete(interaction, deps);
@@ -87,8 +93,15 @@ export async function handleDiscordInteraction(
 	if (interaction.type !== DiscordInteractionType.applicationCommand) {
 		return ephemeralResponse("Unsupported Discord interaction.");
 	}
-	if (interaction.data?.name === "status" && deps.capabilityJobStore) {
-		return handleStatusCommand(interaction, user.id, deps.capabilityJobStore);
+	if (interaction.data?.name === "status") {
+		return deps.capabilityJobStore
+			? handleStatusCommand(interaction, user.id, deps.capabilityJobStore)
+			: ephemeralResponse("Capability status storage is unavailable.");
+	}
+	if (interaction.data?.name === "cancel") {
+		return deps.capabilityJobStore
+			? handleCancelCommand(interaction, user.id, deps.capabilityJobStore)
+			: ephemeralResponse("Capability cancellation storage is unavailable.");
 	}
 
 	const parsed = parseCommand(interaction, user.id);
@@ -188,22 +201,86 @@ async function handleStatusCommand(
 		);
 	}
 	const record = await store.getJob(requestId);
+	if (record) {
+		if (
+			record.userId !== userId ||
+			(record.guildId && record.guildId !== interaction.guild_id)
+		) {
+			return ephemeralResponse("ไม่พบงานนี้ หรือคุณไม่มีสิทธิ์ดูสถานะงานนี้");
+		}
+		return ephemeralResponse(
+			[
+				`**${record.capability}** — \`${record.status}\``,
+				`Request ID: \`${record.jobId}\``,
+				`Updated: ${record.updatedAt}`,
+				record.audit.at(-1)?.detail,
+			]
+				.filter(Boolean)
+				.join("\n"),
+		);
+	}
+	const approval = await store.getApproval(requestId);
+	if (
+		!approval ||
+		approval.userId !== userId ||
+		(approval.guildId && approval.guildId !== interaction.guild_id)
+	) {
+		return ephemeralResponse("ไม่พบงานหรือ approval นี้ หรือคุณไม่มีสิทธิ์ดู");
+	}
+	return ephemeralResponse(
+		[
+			`**approval** — \`${approval.status}\``,
+			`Approval ID: \`${approval.approvalId}\``,
+			`Request ID: \`${approval.jobId}\``,
+			`Expires: ${approval.expiresAt}`,
+			approval.decidedAt ? `Decided: ${approval.decidedAt}` : undefined,
+		]
+			.filter(Boolean)
+			.join("\n"),
+	);
+}
+
+async function handleCancelCommand(
+	interaction: DiscordInteraction,
+	userId: string,
+	store: CapabilityJobStore,
+): Promise<Response> {
+	const requestId = stringOption(
+		interaction.data?.options ?? [],
+		"request_id",
+	)?.trim();
+	if (!requestId) {
+		return ephemeralResponse("ระบุ request_id ของงานที่ต้องการยกเลิก");
+	}
+	const record = await store.getJob(requestId);
 	if (
 		!record ||
 		record.userId !== userId ||
 		(record.guildId && record.guildId !== interaction.guild_id)
 	) {
-		return ephemeralResponse("ไม่พบงานนี้ หรือคุณไม่มีสิทธิ์ดูสถานะงานนี้");
+		return ephemeralResponse("ไม่พบงานนี้ หรือคุณไม่มีสิทธิ์ยกเลิกงานนี้");
 	}
+	if (["completed", "failed", "cancelled"].includes(record.status)) {
+		return ephemeralResponse(
+			`งาน \`${record.jobId}\` สิ้นสุดแล้วด้วยสถานะ \`${record.status}\``,
+		);
+	}
+	if (record.capability === "deploy_request" && record.status === "running") {
+		return ephemeralResponse(
+			"Deploy เริ่มทำงานแล้ว จึงไม่สามารถยืนยันการยกเลิกอย่างปลอดภัยได้ กรุณาใช้ /status และตรวจ health/rollback plan",
+		);
+	}
+	const cancelled = await store.transitionJob({
+		jobId: record.jobId,
+		from: ["queued", "running", "waiting_approval"],
+		to: "cancelled",
+		detail: "Cancelled by Discord user",
+		actorUserId: userId,
+	});
 	return ephemeralResponse(
-		[
-			`**${record.capability}** — \`${record.status}\``,
-			`Request ID: \`${record.jobId}\``,
-			`Updated: ${record.updatedAt}`,
-			record.audit.at(-1)?.detail,
-		]
-			.filter(Boolean)
-			.join("\n"),
+		cancelled?.status === "cancelled"
+			? `ยกเลิกงาน \`${record.jobId}\` แล้ว`
+			: `ยกเลิกงาน \`${record.jobId}\` ไม่สำเร็จ สถานะปัจจุบันคือ \`${cancelled?.status ?? "unknown"}\``,
 	);
 }
 
@@ -249,6 +326,17 @@ async function handleAutocomplete(
 			return autocompleteResponse(toChoices(repositories, query));
 		}
 		if (focused.name === "branch") {
+			const repository = stringOption(
+				interaction.data?.options ?? [],
+				"repository",
+			);
+			if (!repository || !isValidRepository(repository)) {
+				return autocompleteResponse([]);
+			}
+			const branches = await codeSourceClient.listBranches(repository);
+			return autocompleteResponse(toChoices(branches, query));
+		}
+		if (interaction.data.name === "risk" && focused.name === "base_ref") {
 			const repository = stringOption(
 				interaction.data?.options ?? [],
 				"repository",
@@ -593,8 +681,19 @@ function parseCommand(
 		}
 		const change = stringOption(options, "change")?.trim() ?? "";
 		const context = stringOption(options, "context")?.trim() || undefined;
+		const baseRef = stringOption(options, "base_ref")?.trim() || undefined;
+		const pullRequest = numberOption(options, "pull_request");
 		if (!change) {
 			return { ok: false, error: "The change option is required." };
+		}
+		if (baseRef && !isValidGitRef(baseRef)) {
+			return { ok: false, error: "base_ref is not a valid Git ref." };
+		}
+		if (
+			pullRequest !== undefined &&
+			(!Number.isInteger(pullRequest) || pullRequest < 1)
+		) {
+			return { ok: false, error: "pull_request must be a positive integer." };
 		}
 		return {
 			ok: true,
@@ -606,6 +705,8 @@ function parseCommand(
 				text: [
 					`repo: ${scope.repository}`,
 					`branch: ${scope.branch}`,
+					baseRef ? `base_ref: ${baseRef}` : "",
+					pullRequest ? `pull_request: ${pullRequest}` : "",
 					"Create a risk assessment for this implementation/deployment change.",
 					"",
 					change,
@@ -624,6 +725,8 @@ function parseCommand(
 					branch: scope.branch,
 					change,
 					context,
+					baseRef,
+					pullRequest,
 				},
 			},
 		};
@@ -761,8 +864,22 @@ function parseCommand(
 	return {
 		ok: false,
 		error:
-			"Unknown command. Use /ask, /code, /risk, /db, /artifact, /deploy, /status, /skills, or /clear.",
+			"Unknown command. Use /ask, /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, or /clear.",
 	};
+}
+
+function numberOption(
+	options: readonly DiscordCommandOption[],
+	name: string,
+): number | undefined {
+	for (const option of options) {
+		if (option.name === name && typeof option.value === "number") {
+			return option.value;
+		}
+		const nested = numberOption(option.options ?? [], name);
+		if (nested !== undefined) return nested;
+	}
+	return undefined;
 }
 
 function isArtifactKind(

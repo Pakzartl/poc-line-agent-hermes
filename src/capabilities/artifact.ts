@@ -63,6 +63,7 @@ export type HilArtifactMetadata = {
 
 export type HilArtifactV1 = {
 	version: typeof hilArtifactVersion;
+	artifactId: string;
 	title: string;
 	capability: string;
 	status: HilArtifactStatus;
@@ -81,6 +82,7 @@ export function renderHilArtifactMarkdown(artifact: HilArtifactV1): string {
 		`# ${artifact.title}`,
 		"",
 		`- Version: ${artifact.version}`,
+		`- Artifact ID: ${artifact.artifactId}`,
 		`- Capability: ${artifact.capability}`,
 		`- Status: ${artifact.status}`,
 		`- Created: ${artifact.metadata.createdAt}`,

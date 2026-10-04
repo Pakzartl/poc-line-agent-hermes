@@ -1,14 +1,15 @@
 import { describe, expect, test } from "bun:test";
+import { createMemoryCapabilityJobStore } from "../capabilities/job-store";
 import { loadConfig } from "../config";
 import { createMemoryTelegramSourceSelectionStore } from "../telegram/source-selection";
 import { createPassThroughTelegramUpdateStore } from "../telegram/update-store";
-import type { DiscordJob } from "./job";
 import { createDiscordGatewaySignature } from "./gateway-signature";
 import {
-	handleDiscordGatewayMessage,
 	type DiscordGatewayMessage,
 	type DiscordGatewayWebhookDeps,
+	handleDiscordGatewayMessage,
 } from "./gateway-webhook";
+import type { DiscordJob } from "./job";
 
 const sharedSecret = "gateway-secret-which-is-long-enough";
 
@@ -18,6 +19,8 @@ describe("Discord Gateway webhook", () => {
 		const replies: { channelId: string; text: string; messageId?: string }[] =
 			[];
 		const deps = testDeps(jobs, replies);
+		const capabilityStore = createMemoryCapabilityJobStore();
+		deps.capabilityJobStore = capabilityStore;
 
 		const ignored = await send(
 			deps,
@@ -68,6 +71,7 @@ describe("Discord Gateway webhook", () => {
 			question: "หา issue rate limit ให้หน่อย",
 			idempotencyKey: "discord:message:1000004",
 		});
+		expect((await capabilityStore.getJob("1000004"))?.status).toBe("queued");
 	});
 
 	test("rejects unsigned requests before parsing and ignores unauthorized users", async () => {
@@ -86,6 +90,44 @@ describe("Discord Gateway webhook", () => {
 			gatewayMessage({ userId: "999999", botMentioned: true }),
 		);
 		expect(unauthorized.status).toBe(204);
+	});
+
+	test("uses a thread and carries the progress message id into the queued job", async () => {
+		const jobs: DiscordJob[] = [];
+		const replies: { channelId: string; text: string; messageId?: string }[] =
+			[];
+		const deps = testDeps(jobs, replies);
+		deps.discordReplyClient.createThread = async () => "thread-123";
+		deps.discordReplyClient.replyToChannel = async (
+			channelId,
+			text,
+			messageId,
+		) => {
+			replies.push({ channelId, text, messageId });
+			return text.includes("กำลังตรวจสอบ") ? "progress-123" : undefined;
+		};
+
+		await send(
+			deps,
+			gatewayMessage({
+				messageId: "1000010",
+				content: "<@900001> ตรวจ rate limit",
+				botMentioned: true,
+			}),
+		);
+		await send(
+			deps,
+			gatewayMessage({ messageId: "1000011", content: "lms-backend" }),
+		);
+		await send(deps, gatewayMessage({ messageId: "1000012", content: "dev" }));
+
+		expect(jobs[0]).toMatchObject({
+			channelId: "thread-123",
+			sourceMessageId: undefined,
+			progressMessageId: "progress-123",
+			providerSessionId: "discord:channel:source-v1:600001:thread-123:700001",
+		});
+		expect(replies.at(-1)).toMatchObject({ channelId: "thread-123" });
 	});
 });
 

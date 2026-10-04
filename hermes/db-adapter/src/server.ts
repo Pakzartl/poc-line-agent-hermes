@@ -1,6 +1,6 @@
 import { timingSafeEqual } from "node:crypto";
-import { loadDbAdapterConfig, type DbAdapterConfig } from "./config";
-import { executeWithPsql, type DbExecutor } from "./executor";
+import { type DbAdapterConfig, loadDbAdapterConfig } from "./config";
+import { type DbExecutor, executeWithPsql } from "./executor";
 import { validateDbReadRequest } from "./policy";
 
 const maxRequestBytes = 32_768;
@@ -40,7 +40,11 @@ export function createDbAdapterHandler(input: {
 			return Response.json({ error: "invalid JSON" }, { status: 400 });
 		}
 		const validation = validateDbReadRequest(body, {
-			datasources: input.config.datasources.map((item) => item.alias),
+			datasources: input.config.datasources.map((item) => ({
+				alias: item.alias,
+				allowedSchemas: item.allowedSchemas,
+				allowedTables: item.allowedTables,
+			})),
 			...input.config.limits,
 		});
 		if (!validation.ok) {
@@ -59,6 +63,7 @@ export function createDbAdapterHandler(input: {
 			);
 		}
 		try {
+			const startedAt = performance.now();
 			const result = await execute({
 				query: validation.query,
 				datasource,
@@ -76,12 +81,14 @@ export function createDbAdapterHandler(input: {
 			}
 			return Response.json(
 				{
+					datasource: validation.query.datasource,
 					rows,
 					columns: [...new Set(rows.flatMap((row) => Object.keys(row)))],
 					rowCount: rows.length,
 					truncated:
 						result.truncated === true || result.rows.length > rows.length,
 					fingerprint: validation.query.fingerprint,
+					durationMs: Math.max(0, Math.round(performance.now() - startedAt)),
 				},
 				{
 					headers: {

@@ -21,8 +21,24 @@ export type DiscordReplyClient = {
 		text: string,
 		replyToMessageId?: string,
 		options?: DiscordReplyOptions,
-	): Promise<void>;
+	): Promise<string | undefined>;
 	sendTyping(channelId: string): Promise<void>;
+	createThread?(
+		channelId: string,
+		messageId: string,
+		name: string,
+	): Promise<string | undefined>;
+	editChannelMessage?(
+		channelId: string,
+		messageId: string,
+		text: string,
+		options?: DiscordReplyOptions,
+	): Promise<void>;
+	updateInteractionProgress?(
+		applicationId: string,
+		interactionToken: string,
+		text: string,
+	): Promise<void>;
 };
 
 export type DiscordReplyAttachment = {
@@ -33,6 +49,7 @@ export type DiscordReplyAttachment = {
 
 export type DiscordReplyOptions = {
 	attachment?: DiscordReplyAttachment;
+	attachments?: readonly DiscordReplyAttachment[];
 	components?: readonly Record<string, unknown>[];
 };
 
@@ -77,8 +94,9 @@ export function createDiscordReplyClient(config: {
 		},
 		async replyToChannel(channelId, text, replyToMessageId, replyOptions) {
 			const chunks = splitDiscordMessage(text);
+			let firstMessageId: string | undefined;
 			for (const [index, chunk] of chunks.entries()) {
-				await sendBotRequest(
+				const response = await sendBotRequest(
 					`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/messages`,
 					{
 						content: chunk,
@@ -94,12 +112,49 @@ export function createDiscordReplyClient(config: {
 					},
 					index === 0 ? replyOptions : undefined,
 				);
+				if (index === 0) firstMessageId = await responseMessageId(response);
 			}
+			return firstMessageId;
 		},
 		async sendTyping(channelId) {
 			await sendBotRequest(
 				`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/typing`,
 			);
+		},
+		async updateInteractionProgress(applicationId, interactionToken, text) {
+			await sendInteraction(
+				`${apiBaseUrl}/webhooks/${encodeURIComponent(applicationId)}/${encodeURIComponent(interactionToken)}/messages/@original`,
+				"PATCH",
+				text,
+			);
+		},
+		async createThread(channelId, messageId, name) {
+			const response = await sendBotRequest(
+				`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}/threads`,
+				{
+					name: name.trim().slice(0, 100) || "Javis investigation",
+					auto_archive_duration: 60,
+				},
+			);
+			return responseMessageId(response);
+		},
+		async editChannelMessage(channelId, messageId, text, replyOptions) {
+			const chunks = splitDiscordMessage(text);
+			await sendBotRequest(
+				`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`,
+				{
+					content: chunks[0] ?? "Done",
+					allowed_mentions: { parse: [] },
+				},
+				replyOptions,
+				"PATCH",
+			);
+			for (const chunk of chunks.slice(1)) {
+				await sendBotRequest(
+					`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/messages`,
+					{ content: chunk, allowed_mentions: { parse: [] } },
+				);
+			}
 		},
 	};
 
@@ -118,7 +173,7 @@ export function createDiscordReplyClient(config: {
 					...(options?.components ? { components: options.components } : {}),
 					...(method === "POST" ? { flags: 1 << 6 } : {}),
 				},
-				options?.attachment,
+				options,
 			),
 		});
 		if (!response.ok) {
@@ -131,23 +186,43 @@ export function createDiscordReplyClient(config: {
 
 	function requestPayload(
 		payload: Record<string, unknown>,
-		attachment?: DiscordReplyAttachment,
+		options?: DiscordReplyOptions,
 	): Pick<RequestInit, "headers" | "body"> {
-		if (!attachment) {
+		const attachments = options?.attachments?.length
+			? [...options.attachments]
+			: options?.attachment
+				? [options.attachment]
+				: [];
+		if (attachments.length === 0) {
 			return {
 				headers: { "Content-Type": "application/json" },
 				body: JSON.stringify(payload),
 			};
 		}
 		const form = new FormData();
-		form.append("payload_json", JSON.stringify(payload));
 		form.append(
-			"files[0]",
-			new Blob([attachmentBlobPart(attachment.data)], {
-				type: attachment.contentType,
-			}),
-			attachment.filename,
+			"payload_json",
+			JSON.stringify(
+				attachments.length > 1
+					? {
+							...payload,
+							attachments: attachments.map((attachment, id) => ({
+								id,
+								filename: attachment.filename,
+							})),
+						}
+					: payload,
+			),
 		);
+		for (const [index, attachment] of attachments.entries()) {
+			form.append(
+				`files[${index}]`,
+				new Blob([attachmentBlobPart(attachment.data)], {
+					type: attachment.contentType,
+				}),
+				attachment.filename,
+			);
+		}
 		return { body: form };
 	}
 
@@ -164,7 +239,8 @@ export function createDiscordReplyClient(config: {
 		url: string,
 		body?: Record<string, unknown>,
 		options?: DiscordReplyOptions,
-	): Promise<void> {
+		method: "POST" | "PATCH" = "POST",
+	): Promise<Response> {
 		if (!config.botToken?.trim()) {
 			throw new Error("DISCORD_BOT_TOKEN is required for channel replies");
 		}
@@ -172,11 +248,9 @@ export function createDiscordReplyClient(config: {
 			body && options?.components
 				? { ...body, components: options.components }
 				: body;
-		const payload = messageBody
-			? requestPayload(messageBody, options?.attachment)
-			: {};
+		const payload = messageBody ? requestPayload(messageBody, options) : {};
 		const response = await fetchImpl(url, {
-			method: "POST",
+			method,
 			headers: {
 				Authorization: `Bot ${config.botToken}`,
 				...(payload.headers ?? {}),
@@ -189,6 +263,19 @@ export function createDiscordReplyClient(config: {
 				`Discord bot request failed with status ${response.status}`,
 			);
 		}
+		return response;
+	}
+}
+
+async function responseMessageId(
+	response: Response,
+): Promise<string | undefined> {
+	if (response.status === 204) return undefined;
+	try {
+		const body = (await response.json()) as { id?: unknown };
+		return typeof body.id === "string" && body.id ? body.id : undefined;
+	} catch {
+		return undefined;
 	}
 }
 

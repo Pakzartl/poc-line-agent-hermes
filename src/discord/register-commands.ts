@@ -1,4 +1,5 @@
 const stringOptionType = 3;
+const integerOptionType = 4;
 
 const repositoryOption = {
 	type: stringOptionType,
@@ -58,6 +59,22 @@ export const discordCommands = [
 				required: true,
 				min_length: 1,
 				max_length: 4_000,
+			},
+			{
+				type: stringOptionType,
+				name: "base_ref",
+				description: "Optional base branch/tag/SHA to compare with branch",
+				required: false,
+				autocomplete: true,
+				min_length: 1,
+				max_length: 200,
+			},
+			{
+				type: integerOptionType,
+				name: "pull_request",
+				description: "Optional GitHub pull request number",
+				required: false,
+				min_value: 1,
 			},
 			{
 				type: stringOptionType,
@@ -149,13 +166,27 @@ export const discordCommands = [
 	},
 	{
 		name: "status",
-		description: "Check capability job status",
+		description: "Check capability job or approval status",
 		options: [
 			{
 				type: stringOptionType,
 				name: "request_id",
 				description: "Optional request id from an earlier capability job",
 				required: false,
+				min_length: 1,
+				max_length: 200,
+			},
+		],
+	},
+	{
+		name: "cancel",
+		description: "Cancel a queued or running non-deploy capability job",
+		options: [
+			{
+				type: stringOptionType,
+				name: "request_id",
+				description: "Request id from the capability response",
+				required: true,
 				min_length: 1,
 				max_length: 200,
 			},

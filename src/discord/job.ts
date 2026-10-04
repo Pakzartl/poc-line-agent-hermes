@@ -1,19 +1,23 @@
 import { ResponsesApiError } from "../agent/llm-client";
 import type { AgentOrchestrator } from "../agent/orchestrator";
+import { createArtifact, parseScreenshotTargets } from "../artifacts/request";
 import {
+	type HilArtifactV1,
 	hilArtifactVersion,
 	renderHilArtifactMarkdown,
 	safeArtifactFilename,
-	type HilArtifactV1,
 } from "../capabilities/artifact";
-import type { CapabilityJobStore } from "../capabilities/job-store";
 import { validateReadOnlySql } from "../capabilities/db";
+import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
 import type { AppConfig } from "../config";
 import type { DatabaseReadClient, DatabaseReadResult } from "../db/client";
-import { createArtifact, parseScreenshotTargets } from "../artifacts/request";
-import { executeApprovedDeploy } from "../deploy/executor";
-import { parseDeployTargets, type DeployPlan } from "../deploy/plan";
+import {
+	type DeployExecutionResult,
+	DeployExecutionUncertainError,
+	executeApprovedDeploy,
+} from "../deploy/executor";
+import { type DeployPlan, parseDeployTargets } from "../deploy/plan";
 import {
 	findRecoveredAssistantMessage,
 	HermesApiError,
@@ -44,6 +48,7 @@ export type DiscordJob = {
 	guildId?: string;
 	delivery?: "interaction" | "channel";
 	sourceMessageId?: string;
+	progressMessageId?: string;
 	action: "chat" | "clear" | "status" | "skills" | "deploy_execute";
 	capability?: DiscordCapabilityPayload;
 	text: string;
@@ -87,6 +92,7 @@ type DiscordQueueMessage = {
 type DiscordJobAnswer = {
 	text: string;
 	attachment?: DiscordReplyAttachment;
+	capabilityStatus?: "completed" | "failed";
 };
 
 const maxDeliveryAttempts = 3;
@@ -96,10 +102,12 @@ const genericFailureMessage =
 
 class DiscordManualInterventionError extends Error {
 	readonly retryable = true;
+	readonly userMessage: string;
 
-	constructor(message: string) {
+	constructor(message: string, userMessage = genericFailureMessage) {
 		super(message);
 		this.name = "DiscordManualInterventionError";
+		this.userMessage = userMessage;
 	}
 }
 
@@ -146,6 +154,22 @@ export async function processDiscordQueueMessage(
 			}),
 		);
 		if (error instanceof DiscordManualInterventionError) {
+			try {
+				await beginReply(
+					message.body,
+					deps.discordUpdateStore,
+					error.userMessage,
+				);
+				await deliverReply(message.body, deps, error.userMessage);
+			} catch (replyError) {
+				console.error(
+					JSON.stringify({
+						message: "discord manual-intervention reply failed",
+						interactionId: message.body.interactionId,
+						error: describeError(replyError),
+					}),
+				);
+			}
 			await terminalUpdate(
 				message.body,
 				deps.discordUpdateStore,
@@ -154,6 +178,7 @@ export async function processDiscordQueueMessage(
 					terminalReason: describeError(error),
 				},
 			);
+			await failCapabilityJob(message.body, deps, describeError(error));
 			message.ack();
 			return;
 		}
@@ -217,6 +242,12 @@ async function processDiscordJob(
 		await recoverHermesAnswer(job, deps, lease.record);
 		return "processed";
 	}
+	if (await isCapabilityJobCancelled(job, deps)) {
+		await terminalUpdate(job, deps.discordUpdateStore, "complete", {
+			terminalReason: "Capability job cancelled before execution",
+		});
+		return "processed";
+	}
 	if (
 		job.capability &&
 		deps.capabilityJobStore &&
@@ -229,6 +260,7 @@ async function processDiscordJob(
 			detail: "Discord queue worker started capability execution",
 		});
 	}
+	await updateInteractionProgress(job, deps.discordReplyClient);
 
 	const stopTyping = await startTypingHeartbeat(job, deps.discordReplyClient);
 	try {
@@ -236,6 +268,12 @@ async function processDiscordJob(
 			job.action === "clear"
 				? { text: await clearConversation(deps, sessionId, route) }
 				: await answerQuestion(job, deps, sessionId, route);
+		if (await isCapabilityJobCancelled(job, deps)) {
+			await terminalUpdate(job, deps.discordUpdateStore, "complete", {
+				terminalReason: "Capability job cancelled before response delivery",
+			});
+			return "processed";
+		}
 		const responseText = job.capability
 			? `${answer.text}\n\nRequest ID: \`${capabilityJobId(job)}\``
 			: answer.text;
@@ -257,8 +295,11 @@ async function processDiscordJob(
 			await deps.capabilityJobStore.transitionJob({
 				jobId: capabilityJobId(job),
 				from: "running",
-				to: "completed",
-				detail: "Discord response and HIL artifact delivered",
+				to: answer.capabilityStatus ?? "completed",
+				detail:
+					answer.capabilityStatus === "failed"
+						? "Capability failed; Discord failure artifact delivered"
+						: "Discord response and HIL artifact delivered",
 			});
 		}
 		return "processed";
@@ -308,14 +349,14 @@ async function answerQuestion(
 		if (!validation.ok) {
 			return { text: `DB request rejected: ${validation.reason}` };
 		}
+		const result = await deps.databaseReadClient.query({
+			sql: validation.sql,
+			requestId: job.interactionId,
+			requestedBy: job.userId,
+		});
 		return {
-			text: formatDatabaseResult(
-				await deps.databaseReadClient.query({
-					sql: validation.sql,
-					requestId: job.interactionId,
-					requestedBy: job.userId,
-				}),
-			),
+			text: formatDatabaseResult(result),
+			attachment: buildDatabaseResultAttachment(job, result),
 		};
 	}
 	if (route === "hermes") {
@@ -475,6 +516,15 @@ async function deliverReply(
 		if (!job.channelId) {
 			throw new Error("Discord channel delivery requires channelId");
 		}
+		if (job.progressMessageId && deps.discordReplyClient.editChannelMessage) {
+			await deps.discordReplyClient.editChannelMessage(
+				job.channelId,
+				job.progressMessageId,
+				text,
+				replyOptions,
+			);
+			return;
+		}
 		await deps.discordReplyClient.replyToChannel(
 			job.channelId,
 			text,
@@ -500,10 +550,16 @@ async function buildDiscordReplyOptions(
 	text: string,
 	attachmentOverride?: DiscordReplyAttachment,
 ): Promise<DiscordReplyOptions | undefined> {
-	const attachment =
-		attachmentOverride ?? buildDiscordArtifactAttachment(job, text);
+	const hilAttachment = buildDiscordArtifactAttachment(job, text);
+	const attachment = attachmentOverride ?? hilAttachment;
+	const attachments =
+		attachmentOverride && hilAttachment
+			? [attachmentOverride, hilAttachment]
+			: undefined;
 	if (!isDeployApprovalRequest(job)) {
-		return attachment ? { attachment } : undefined;
+		return attachment
+			? { attachment, ...(attachments ? { attachments } : {}) }
+			: undefined;
 	}
 	if (!job.deployPlan || !deps.capabilityJobStore) {
 		throw new Error("Deploy approval state is unavailable");
@@ -526,6 +582,7 @@ async function buildDiscordReplyOptions(
 	});
 	return {
 		...(attachment ? { attachment } : {}),
+		...(attachments ? { attachments } : {}),
 		components: [
 			{
 				type: 1,
@@ -703,22 +760,81 @@ async function executeDeploy(
 	if (!config?.deployTargetsJson || !config.deployExecutorToken) {
 		throw new Error("Deploy executor is not configured");
 	}
-	const result = await executeApprovedDeploy({
-		plan: job.deployPlan,
-		targets: parseDeployTargets(config.deployTargetsJson),
-		approvedBy: job.approvedBy,
-		approvedDigest: approval.actionDigest,
-		executorToken: config.deployExecutorToken,
-		fetch: deps.fetch,
-	});
+	let result: DeployExecutionResult;
+	try {
+		result = await executeApprovedDeploy({
+			plan: job.deployPlan,
+			targets: parseDeployTargets(config.deployTargetsJson),
+			approvedBy: job.approvedBy,
+			approvedDigest: approval.actionDigest,
+			executorToken: config.deployExecutorToken,
+			fetch: deps.fetch,
+		});
+	} catch (error) {
+		if (error instanceof DeployExecutionUncertainError) {
+			throw new DiscordManualInterventionError(
+				error.message,
+				[
+					"**Deploy execution status is uncertain.**",
+					`Request ID: \`${capabilityJobId(job)}\``,
+					`Plan ID: \`${job.deployPlan.id}\``,
+					"Do not approve or submit a new deploy blindly. Check the deploy executor record/status using this Plan ID first.",
+				].join("\n"),
+			);
+		}
+		throw error;
+	}
+	const rollbackGuidance = isRecord(result.artifact.rollbackGuidance)
+		? result.artifact.rollbackGuidance
+		: undefined;
 	return {
 		text: [
-			`Deploy accepted for **${job.deployPlan.targetName}**.`,
+			result.status === "succeeded"
+				? `Deploy succeeded for **${job.deployPlan.targetName}**.`
+				: `Deploy failed for **${job.deployPlan.targetName}**.`,
 			`Execution ID: \`${result.executionId}\``,
+			`Commit: \`${job.deployPlan.commitSha}\``,
+			result.replayed
+				? "Executor returned the existing idempotent result."
+				: undefined,
+			result.status === "failed"
+				? "No automatic rollback was run. A separate approval is required."
+				: undefined,
+			typeof rollbackGuidance?.reason === "string"
+				? `Failure: ${rollbackGuidance.reason}`
+				: undefined,
 			result.statusUrl ? `Status: ${result.statusUrl}` : undefined,
 		]
 			.filter(Boolean)
 			.join("\n"),
+		attachment: {
+			filename: safeArtifactFilename({
+				title: `deploy-${result.status}-${job.deployPlan.targetId}`,
+				capability: "deploy",
+				extension: "json",
+			}),
+			contentType: "application/json;charset=utf-8",
+			data: `${JSON.stringify(
+				{
+					version: "deploy-hil-artifact/v1",
+					artifactId: result.executionId,
+					requestId: capabilityJobId(job),
+					planId: job.deployPlan.id,
+					planDigest: job.deployPlan.digest,
+					target: job.deployPlan.targetId,
+					commitSha: job.deployPlan.commitSha,
+					approvedBy: job.approvedBy,
+					status: result.status,
+					replayed: result.replayed,
+					executorArtifact: result.artifact,
+					rollbackRequiresSeparateApproval:
+						job.deployPlan.rollback.requiresSeparateApproval,
+				},
+				null,
+				2,
+			)}\n`,
+		},
+		capabilityStatus: result.status === "failed" ? "failed" : "completed",
 	};
 }
 
@@ -748,6 +864,47 @@ async function startTypingHeartbeat(
 		void sendTyping();
 	}, 8_000);
 	return () => clearInterval(timer);
+}
+
+async function updateInteractionProgress(
+	job: DiscordJob,
+	client: DiscordReplyClient,
+): Promise<void> {
+	if (
+		job.delivery === "channel" ||
+		!job.interactionToken ||
+		!client.updateInteractionProgress
+	) {
+		return;
+	}
+	try {
+		await client.updateInteractionProgress(
+			job.applicationId,
+			job.interactionToken,
+			job.capability
+				? `กำลังทำงาน \`${capabilityName(job)}\`… Request ID: \`${capabilityJobId(job)}\``
+				: "กำลังประมวลผล…",
+		);
+	} catch (error) {
+		console.warn(
+			JSON.stringify({
+				message: "discord interaction progress update failed",
+				interactionId: job.interactionId,
+				error: describeError(error),
+			}),
+		);
+	}
+}
+
+async function isCapabilityJobCancelled(
+	job: DiscordJob,
+	deps: DiscordJobProcessorDeps,
+): Promise<boolean> {
+	if (!job.capability || !deps.capabilityJobStore) return false;
+	return (
+		(await deps.capabilityJobStore.getJob(capabilityJobId(job)))?.status ===
+		"cancelled"
+	);
 }
 
 async function beginReply(
@@ -811,10 +968,17 @@ Prepare a deployment plan only. Do not deploy automatically. Include target, com
 		return job.text;
 	}
 	if (job.capability?.kind === "risk_assessment") {
+		const evidenceScope = job.capability.pullRequest
+			? `First call get_pull_request with number ${job.capability.pullRequest}.`
+			: job.capability.baseRef
+				? `First call compare_refs with base ${job.capability.baseRef} and head ${job.branch}.`
+				: "No PR or base ref was supplied. State this evidence gap and do not invent a diff.";
 		return formatHermesSourceInput({
 			repository: job.repository,
 			branch: job.branch,
 			question: `Risk assessment request: ${job.capability.change}
+
+${evidenceScope}
 
 Please inspect the implementation/deployment impact. Include blast radius, side effects, files/functions affected, where humans should test, and a concise approval recommendation.`,
 		});
@@ -856,6 +1020,7 @@ function buildDiscordArtifactAttachment(
 	const createdAt = new Date().toISOString();
 	const artifact: HilArtifactV1 = {
 		version: hilArtifactVersion,
+		artifactId: `artifact_${job.interactionId}`,
 		title:
 			capability === "risk-assessment"
 				? `Risk Assessment: ${job.repository}@${job.branch}`
@@ -909,12 +1074,12 @@ function buildDiscordArtifactAttachment(
 				: capability === "ask-database"
 					? [
 							{
-								title: "Read-only query guard",
+								title: "Bounded read-only result",
 								impact:
-									"Live database reads require explicit read-only tooling and query safety checks.",
-								likelihood: "high",
+									"The result may be truncated, masked, or stale by the time a human acts on it.",
+								likelihood: "medium",
 								mitigation:
-									"Configure a read-only DB connector before executing SQL from Discord.",
+									"Verify datasource, fingerprint, duration, row count, truncation, and masked fields in the attached result artifact.",
 							},
 						]
 					: capability === "deploy"
@@ -948,9 +1113,9 @@ function buildDiscordArtifactAttachment(
 				: capability === "ask-database"
 					? [
 							{
-								label: "Confirm DB tooling",
+								label: "Review query provenance",
 								description:
-									"Verify a read-only database connector, allowlist, timeout, row limit, and PII masking before live SQL.",
+									"Confirm datasource, SQL fingerprint, allowlisted tables, truncation, and PII masking before using the result.",
 								required: true,
 							},
 						]
@@ -975,7 +1140,7 @@ function buildDiscordArtifactAttachment(
 			capability === "risk-assessment"
 				? "Approve only after the human verification actions pass."
 				: capability === "ask-database"
-					? "Do not run live SQL until read-only database tooling is configured."
+					? "Use the attached result only after reviewing its bounded-query provenance and limitations."
 					: capability === "deploy"
 						? "Treat this as a deployment plan, not deployment approval."
 						: "Use this artifact as an investigation handoff with cited evidence.",
@@ -1085,12 +1250,56 @@ function isDeployApprovalRequest(job: DiscordJob): boolean {
 function formatDatabaseResult(result: DatabaseReadResult): string {
 	return [
 		"**Read-only database result**",
+		`Datasource: \`${result.datasource}\``,
 		`Rows: ${result.rowCount}${result.truncated ? " (truncated)" : ""}`,
+		`Duration: ${result.durationMs} ms`,
 		`Query fingerprint: \`${result.audit.fingerprint}\``,
-		"```json",
-		JSON.stringify(result.rows, null, 2),
-		"```",
+		"Result rows and query provenance are attached as a JSON HIL artifact.",
 	].join("\n");
+}
+
+function buildDatabaseResultAttachment(
+	job: DiscordJob,
+	result: DatabaseReadResult,
+): DiscordReplyAttachment {
+	const createdAt = new Date().toISOString();
+	return {
+		filename: safeArtifactFilename({
+			title: `database-result-${result.audit.fingerprint}`,
+			capability: "ask-database",
+			createdAt,
+			extension: "json",
+		}),
+		contentType: "application/json;charset=utf-8",
+		data: `${JSON.stringify(
+			{
+				version: "db-query-artifact/v1",
+				artifactId: `artifact_${job.interactionId}`,
+				capability: "ask-database",
+				status: "completed",
+				createdAt,
+				requestId: capabilityJobId(job),
+				datasource: result.datasource,
+				query: {
+					sql: result.sql,
+					fingerprint: result.audit.fingerprint,
+					referencedTables: result.audit.referencedTables,
+					limits: result.audit.limits,
+				},
+				durationMs: result.durationMs,
+				columns: result.columns,
+				rowCount: result.rowCount,
+				truncated: result.truncated,
+				rows: result.rows,
+				humanActions: [
+					"Confirm the datasource and query fingerprint before sharing the result.",
+					"Review masked fields and truncation before using this artifact for a decision.",
+				],
+			},
+			null,
+			2,
+		)}\n`,
+	};
 }
 
 function selectDiscordRuntime(
@@ -1112,6 +1321,10 @@ function isRetryableJobError(error: unknown): boolean {
 		return error.retryable;
 	}
 	return true;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
 }
 
 async function hashCanonicalInput(text: string): Promise<string> {

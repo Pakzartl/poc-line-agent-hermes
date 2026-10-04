@@ -233,4 +233,69 @@ describe("Discord reply client", () => {
 			components,
 		});
 	});
+
+	test("creates an investigation thread and edits a progress message in place", async () => {
+		const requests: { url: string; method?: string; body?: unknown }[] = [];
+		const client = createDiscordReplyClient({
+			apiBaseUrl: "https://discord.example/api/v10",
+			botToken: "bot-token",
+			fetch: async (input, init) => {
+				requests.push({
+					url: String(input),
+					method: init?.method,
+					body: init?.body,
+				});
+				if (String(input).endsWith("/threads")) {
+					return Response.json({ id: "thread-1" });
+				}
+				return Response.json({ id: "progress-1" });
+			},
+		});
+
+		expect(
+			await client.createThread?.("channel", "message", "Javis test"),
+		).toBe("thread-1");
+		await client.editChannelMessage?.("thread-1", "progress-1", "completed");
+
+		expect(requests[0]?.url).toEndWith(
+			"/channels/channel/messages/message/threads",
+		);
+		expect(requests[1]).toMatchObject({
+			url: "https://discord.example/api/v10/channels/thread-1/messages/progress-1",
+			method: "PATCH",
+		});
+	});
+
+	test("uploads a data artifact and Markdown HIL artifact together", async () => {
+		let body: FormData | undefined;
+		const client = createDiscordReplyClient({
+			apiBaseUrl: "https://discord.example/api/v10",
+			fetch: async (_input, init) => {
+				body = init?.body as FormData;
+				return new Response(null, { status: 204 });
+			},
+		});
+		await client.reply("app", "token", "done", {
+			attachments: [
+				{
+					filename: "result.json",
+					contentType: "application/json",
+					data: "{}",
+				},
+				{
+					filename: "hil.md",
+					contentType: "text/markdown",
+					data: "# HIL",
+				},
+			],
+		});
+
+		const payload = JSON.parse(String(body?.get("payload_json")));
+		expect(payload.attachments).toEqual([
+			{ id: 0, filename: "result.json" },
+			{ id: 1, filename: "hil.md" },
+		]);
+		expect(await (body?.get("files[0]") as File).text()).toBe("{}");
+		expect(await (body?.get("files[1]") as File).text()).toBe("# HIL");
+	});
 });

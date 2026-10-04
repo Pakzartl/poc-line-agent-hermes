@@ -1,8 +1,8 @@
 import {
-	hilArtifactVersion,
 	type HilArtifactEvidence,
 	type HilArtifactFinding,
 	type HilArtifactV1,
+	hilArtifactVersion,
 } from "../capabilities/artifact";
 
 export const queueFailureEventVersion = "queue-failure/v1" as const;
@@ -46,6 +46,7 @@ const maxArrayItems = 5;
 export async function ingestQueueFailureEvent(input: {
 	body: string;
 	signature: string | null;
+	timestamp: string | null;
 	secret: string;
 	now?: Date;
 }): Promise<QueueFailureIngestResult> {
@@ -59,11 +60,20 @@ export async function ingestQueueFailureEvent(input: {
 	if (new TextEncoder().encode(input.body).byteLength > maxBodyBytes) {
 		return { ok: false, status: 413, error: "payload too large" };
 	}
+	const now = input.now ?? new Date();
+	const timestamp = parseSignatureTimestamp(input.timestamp);
+	if (
+		timestamp === undefined ||
+		Math.abs(now.getTime() - timestamp * 1_000) > 5 * 60 * 1_000
+	) {
+		return { ok: false, status: 401, error: "stale event signature" };
+	}
 	if (
 		!(await verifyQueueFailureSignature(
 			input.body,
 			input.signature,
 			input.secret,
+			String(timestamp),
 		))
 	) {
 		return { ok: false, status: 401, error: "invalid event signature" };
@@ -86,7 +96,7 @@ export async function ingestQueueFailureEvent(input: {
 		idempotencyKey,
 		artifact: buildQueueFailureArtifact(event.value, {
 			idempotencyKey,
-			now: input.now ?? new Date(),
+			now,
 		}),
 	};
 }
@@ -95,13 +105,20 @@ export async function verifyQueueFailureSignature(
 	body: string,
 	signature: string | null,
 	secret: string,
+	timestamp: string,
 ): Promise<boolean> {
-	const expected = await hmacHex(body, secret);
+	const expected = await hmacHex(`${timestamp}.${body}`, secret);
 	const provided = normalizeSignature(signature);
 	if (!provided || provided.length !== expected.length) {
 		return false;
 	}
 	return timingSafeEqualHex(provided, expected);
+}
+
+function parseSignatureTimestamp(value: string | null): number | undefined {
+	if (!value || !/^\d{10}$/.test(value)) return undefined;
+	const timestamp = Number(value);
+	return Number.isSafeInteger(timestamp) ? timestamp : undefined;
 }
 
 export function buildQueueFailureArtifact(
@@ -137,6 +154,7 @@ export function buildQueueFailureArtifact(
 	];
 	return {
 		version: hilArtifactVersion,
+		artifactId: `artifact_queue_failure_${event.eventId}`,
 		title: `Queue failure: ${event.jobName}`,
 		capability: "queue-failure",
 		status: "failed",
@@ -257,6 +275,21 @@ function parseQueueFailureEvent(
 		return {
 			ok: false,
 			error: "attempts must be an integer between 1 and 100",
+		};
+	}
+	if (!Number.isFinite(Date.parse(item.failedAt))) {
+		return { ok: false, error: "failedAt must be an ISO-8601 timestamp" };
+	}
+	if (
+		typeof item.maxAttempts === "number" &&
+		(!Number.isInteger(item.maxAttempts) ||
+			item.maxAttempts < 1 ||
+			item.maxAttempts > 100 ||
+			item.attempts < item.maxAttempts)
+	) {
+		return {
+			ok: false,
+			error: "maxAttempts must be exhausted and between 1 and 100",
 		};
 	}
 	return {

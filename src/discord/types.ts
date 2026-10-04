@@ -68,6 +68,8 @@ export type DiscordCapabilityPayload =
 			branch: string;
 			change: string;
 			context?: string;
+			baseRef?: string;
+			pullRequest?: number;
 	  }
 	| {
 			kind: "database_query";

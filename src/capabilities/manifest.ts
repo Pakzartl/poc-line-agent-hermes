@@ -13,6 +13,7 @@ export type CapabilityManifest = {
 	permissions: readonly CapabilityPermission[];
 	steps: readonly string[];
 	outputArtifact: string;
+	maxOutputBytes: number;
 	verification: readonly string[];
 	failureBehavior: string;
 	demo: string;
@@ -21,6 +22,13 @@ export type CapabilityManifest = {
 };
 
 const mutationPermissions = new Set<CapabilityPermission>(["deploy:mutate"]);
+const knownPermissions = new Set<CapabilityPermission>([
+	"github:read",
+	"database:read",
+	"artifact:create",
+	"deploy:mutate",
+	"event:ingest",
+]);
 
 export const capabilityManifests = [
 	{
@@ -38,6 +46,7 @@ export const capabilityManifests = [
 			"Return cited findings and a HIL investigation artifact",
 		],
 		outputArtifact: "Code investigation HIL artifact with cited evidence",
+		maxOutputBytes: 1_000_000,
 		verification: [
 			"Repository and branch are explicit",
 			"Answer cites paths or explains missing evidence",
@@ -53,7 +62,7 @@ export const capabilityManifests = [
 		description:
 			"Assess blast radius, side effects, and where humans should test before release.",
 		inputContract:
-			"repository owner/name, branch/ref, change description, optional rollout context",
+			"repository owner/name, head branch/ref, change description, optional base ref or pull request, optional rollout context",
 		permissions: ["github:read"],
 		steps: [
 			"Validate source scope",
@@ -62,6 +71,7 @@ export const capabilityManifests = [
 			"Return a Human Test Plan and HIL artifact",
 		],
 		outputArtifact: "Risk assessment HIL artifact plus Human Test Plan",
+		maxOutputBytes: 1_000_000,
 		verification: [
 			"Blast radius is stated",
 			"Side effects are listed",
@@ -69,7 +79,7 @@ export const capabilityManifests = [
 		],
 		failureBehavior:
 			"Fail closed if code evidence is unavailable or source scope is invalid.",
-		demo: "/risk repository:codemonday-dev/lms-backend branch:dev change:deploy learner gateway throttling",
+		demo: "/risk repository:codemonday-dev/lms-backend branch:dev base_ref:main change:deploy learner gateway throttling",
 	},
 	{
 		id: "queue-failure",
@@ -86,6 +96,7 @@ export const capabilityManifests = [
 			"Return and optionally post a one-screen HIL artifact",
 		],
 		outputArtifact: "Queue failure HIL artifact",
+		maxOutputBytes: 256_000,
 		verification: [
 			"Unsigned events are rejected",
 			"Secrets and emails are redacted",
@@ -93,7 +104,7 @@ export const capabilityManifests = [
 		],
 		failureBehavior:
 			"Reject invalid events with 4xx; return 503 when the ingest secret is not configured.",
-		demo: "POST /events/queue-failure with X-Javis-Signature: sha256=...",
+		demo: "POST /events/queue-failure with X-Javis-Timestamp and X-Javis-Signature: sha256=HMAC(timestamp.body)",
 	},
 	{
 		id: "db-read",
@@ -109,6 +120,7 @@ export const capabilityManifests = [
 			"Return a bounded answer and HIL artifact",
 		],
 		outputArtifact: "Read-only database HIL artifact",
+		maxOutputBytes: 1_000_000,
 		verification: [
 			"No write SQL is accepted",
 			"Answer states whether live data was queried",
@@ -132,6 +144,7 @@ export const capabilityManifests = [
 			"Attach the artifact to the Discord response",
 		],
 		outputArtifact: "Markdown, JSON, CSV, Mermaid text, PNG, or JPEG artifact",
+		maxOutputBytes: 7_500_000,
 		verification: [
 			"Structured JSON/CSV output is parsed before attachment",
 			"No user-provided URL reaches the screenshot renderer",
@@ -154,6 +167,7 @@ export const capabilityManifests = [
 			"Require explicit approval before any external mutation",
 		],
 		outputArtifact: "Deployment plan HIL artifact",
+		maxOutputBytes: 1_000_000,
 		verification: [
 			"Plan includes target, ref, checks, risk, rollback, and approval requirement",
 			"No deploy executor is called from normal chat generation",
@@ -190,6 +204,20 @@ export function validateCapabilityManifest(
 	if (manifest.verification.length === 0) {
 		errors.push(`${manifest.id} must document verification`);
 	}
+	for (const permission of manifest.permissions) {
+		if (!knownPermissions.has(permission)) {
+			errors.push(`${manifest.id} declares unknown permission ${permission}`);
+		}
+	}
+	if (
+		!Number.isInteger(manifest.maxOutputBytes) ||
+		manifest.maxOutputBytes < 1 ||
+		manifest.maxOutputBytes > 7_500_000
+	) {
+		errors.push(
+			`${manifest.id} must declare maxOutputBytes between 1 and 7500000`,
+		);
+	}
 	if (
 		manifest.permissions.some((permission) =>
 			mutationPermissions.has(permission),
@@ -201,6 +229,22 @@ export function validateCapabilityManifest(
 		);
 	}
 	return errors;
+}
+
+export function validateSkillMirrorInventory(input: {
+	sourceSkillNames: readonly string[];
+	hermesSkillNames: readonly string[];
+}): string[] {
+	const source = new Set(input.sourceSkillNames);
+	const hermes = new Set(input.hermesSkillNames);
+	return [
+		...[...source]
+			.filter((name) => !hermes.has(name))
+			.map((name) => `source skill ${name} is missing a Hermes mirror`),
+		...[...hermes]
+			.filter((name) => !source.has(name))
+			.map((name) => `Hermes skill ${name} is missing a source mirror`),
+	].sort();
 }
 
 export function assertValidCapabilityManifests(

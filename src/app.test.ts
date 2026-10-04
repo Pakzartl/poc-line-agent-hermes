@@ -54,12 +54,14 @@ describe("app routes", () => {
 				sendTyping: async () => undefined,
 			},
 		});
+		const timestamp = String(Math.floor(Date.now() / 1_000));
 
 		const response = await createAppHandler(deps)(
 			new Request("https://agent.pakzartl.xyz/events/queue-failure", {
 				method: "POST",
 				headers: {
-					"x-javis-signature": `sha256=${await hmacHex(body, secret)}`,
+					"x-javis-timestamp": timestamp,
+					"x-javis-signature": `sha256=${await hmacHex(`${timestamp}.${body}`, secret)}`,
 				},
 				body,
 			}),

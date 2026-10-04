@@ -190,7 +190,7 @@ The DB and deploy endpoints must use credential-free HTTPS URLs; bearer tokens a
 
 ### Queue-failure event artifact
 
-Set `QUEUE_FAILURE_EVENT_SECRET` and optionally `QUEUE_FAILURE_DISCORD_CHANNEL_ID`. Producers send a bounded `queue-failure/v1` JSON body to `/events/queue-failure` with `X-Javis-Signature: sha256=<HMAC-SHA256(body)>`. The Worker verifies the raw body, deduplicates the event, redacts credentials and PII, classifies the likely cause, and posts one Markdown HIL artifact to Discord. No event secret means the endpoint returns `503`.
+Set `QUEUE_FAILURE_EVENT_SECRET` and optionally `QUEUE_FAILURE_DISCORD_CHANNEL_ID`. Producers send a bounded `queue-failure/v1` JSON body to `/events/queue-failure` with the current Unix seconds in `X-Javis-Timestamp` and `X-Javis-Signature: sha256=<HMAC-SHA256(timestamp + "." + body)>`. The Worker rejects signatures older or newer than five minutes, verifies the raw body, deduplicates the event, redacts credentials and PII, classifies the likely cause, and posts one Markdown HIL artifact to Discord. No event secret means the endpoint returns `503`.
 
 ## WhatsApp setup
 
