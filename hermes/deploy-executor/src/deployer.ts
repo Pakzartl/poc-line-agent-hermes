@@ -98,14 +98,21 @@ async function executeDeploy(input: {
 	const target = findTarget(input.config, input.request);
 	const startedAt = input.now().toISOString();
 	const artifactId = `deploy:${input.request.idempotencyKey}`;
-	const stageDir = join(input.config.stateDir, "staging", input.request.idempotencyKey);
+	const stageDir = join(
+		input.config.stateDir,
+		"staging",
+		input.request.idempotencyKey,
+	);
 	const repoDir = join(stageDir, "repo");
 	const backupPath = join(
 		target.backupDir,
 		`${target.id}-${input.request.sha}-${input.request.idempotencyKey}`,
 	);
 	const commands: string[] = [];
-	const run = async (command: readonly string[], options: { cwd?: string } = {}) => {
+	const run = async (
+		command: readonly string[],
+		options: { cwd?: string } = {},
+	) => {
 		commands.push(renderCommand(command));
 		return input.run(command, options);
 	};
@@ -130,9 +137,31 @@ async function executeDeploy(input: {
 	await rm(stageDir, { recursive: true, force: true });
 	await mkdir(stageDir, { recursive: true, mode: 0o700 });
 	try {
-		await run(["git", "clone", "--filter=blob:none", "--no-checkout", target.repo, repoDir]);
-		await run(["git", "-C", repoDir, "fetch", "--depth=1", "origin", input.request.sha]);
-		await run(["git", "-C", repoDir, "checkout", "--detach", input.request.sha]);
+		await run([
+			"git",
+			"clone",
+			"--filter=blob:none",
+			"--no-checkout",
+			target.repo,
+			repoDir,
+		]);
+		await run([
+			"git",
+			"-C",
+			repoDir,
+			"fetch",
+			"--depth=1",
+			"origin",
+			input.request.sha,
+		]);
+		await run([
+			"git",
+			"-C",
+			repoDir,
+			"checkout",
+			"--detach",
+			input.request.sha,
+		]);
 		const rev = await run(["git", "-C", repoDir, "rev-parse", "HEAD"]);
 		stagedCommit = rev.stdout.trim();
 		if (stagedCommit !== input.request.sha) {
@@ -169,7 +198,20 @@ async function executeDeploy(input: {
 				`${target.appDir}/`,
 			]);
 			await run(composeCommand(target, ["up", "-d", "--build"]));
-			await run(["curl", "-fsS", target.healthUrl]);
+			await run([
+				"curl",
+				"--retry",
+				"10",
+				"--retry-delay",
+				"2",
+				"--retry-all-errors",
+				"--connect-timeout",
+				"5",
+				"--max-time",
+				"60",
+				"-fsS",
+				target.healthUrl,
+			]);
 			return {
 				id: artifactId,
 				status: "succeeded",
@@ -183,10 +225,10 @@ async function executeDeploy(input: {
 				backupPath,
 				commands,
 			};
-			} catch (error) {
-				const guidance = rollbackGuidance(
-					error instanceof Error ? error.message : "deployment failed",
-				);
+		} catch (error) {
+			const guidance = rollbackGuidance(
+				error instanceof Error ? error.message : "deployment failed",
+			);
 			return {
 				id: artifactId,
 				status: "failed",
@@ -199,8 +241,8 @@ async function executeDeploy(input: {
 				stagedCommit,
 				backupPath,
 				commands,
-					rollbackGuidance: guidance,
-					error: guidance.reason,
+				rollbackGuidance: guidance,
+				error: guidance.reason,
 			};
 		}
 	} finally {
@@ -208,8 +250,13 @@ async function executeDeploy(input: {
 	}
 }
 
-function findTarget(config: DeployExecutorConfig, request: DeployRequest): DeployTarget {
-	const target = config.targets.find((candidate) => candidate.id === request.target);
+function findTarget(
+	config: DeployExecutorConfig,
+	request: DeployRequest,
+): DeployTarget {
+	const target = config.targets.find(
+		(candidate) => candidate.id === request.target,
+	);
 	if (!target) {
 		throw new DeployInputError("target is not allowlisted");
 	}
@@ -217,12 +264,17 @@ function findTarget(config: DeployExecutorConfig, request: DeployRequest): Deplo
 		throw new DeployInputError("repo is not allowlisted");
 	}
 	if (!/^[0-9a-f]{40}$/.test(request.sha)) {
-		throw new DeployInputError("sha must be a 40-character lowercase commit SHA");
+		throw new DeployInputError(
+			"sha must be a 40-character lowercase commit SHA",
+		);
 	}
 	return target;
 }
 
-function composeCommand(target: DeployTarget, tail: readonly string[]): string[] {
+function composeCommand(
+	target: DeployTarget,
+	tail: readonly string[],
+): string[] {
 	return [
 		"docker",
 		"compose",

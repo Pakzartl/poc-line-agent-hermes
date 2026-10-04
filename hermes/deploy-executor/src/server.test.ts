@@ -1,12 +1,12 @@
-import { mkdir, mkdtemp, rm } from "node:fs/promises";
-import { join } from "node:path";
-import { tmpdir } from "node:os";
 import { describe, expect, test } from "bun:test";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { loadDeployExecutorConfig } from "./config";
 import {
-	deployWithIdempotency,
 	type CommandRunner,
 	type DeployRequest,
+	deployWithIdempotency,
 } from "./deployer";
 import { createDeployExecutorHandler } from "./server";
 
@@ -51,7 +51,9 @@ describe("deploy executor", () => {
 			const handler = createDeployExecutorHandler({
 				config: configFor(temp),
 				run: async (command) => ({
-					stdout: command.join(" ").includes("rev-parse HEAD") ? `${sha}\n` : "",
+					stdout: command.join(" ").includes("rev-parse HEAD")
+						? `${sha}\n`
+						: "",
 					stderr: "",
 				}),
 			});
@@ -132,7 +134,20 @@ describe("deploy executor", () => {
 				"origin",
 				sha,
 			]);
-			expect(commands.at(-1)).toEqual(["curl", "-fsS", "http://127.0.0.1:8642/health"]);
+			expect(commands.at(-1)).toEqual([
+				"curl",
+				"--retry",
+				"10",
+				"--retry-delay",
+				"2",
+				"--retry-all-errors",
+				"--connect-timeout",
+				"5",
+				"--max-time",
+				"60",
+				"-fsS",
+				"http://127.0.0.1:8642/health",
+			]);
 		} finally {
 			await rm(temp.root, { recursive: true, force: true });
 		}
@@ -208,7 +223,9 @@ function workerRequestBody(overrides: Partial<RequestBody> = {}): RequestBody {
 	};
 }
 
-function internalRequest(overrides: Partial<DeployRequest> = {}): DeployRequest {
+function internalRequest(
+	overrides: Partial<DeployRequest> = {},
+): DeployRequest {
 	return {
 		repo,
 		target: "hermes-ovh",
@@ -228,7 +245,11 @@ async function makeTemp() {
 	return { root, appDir, backupDir, stateDir };
 }
 
-function configFor(temp: { appDir: string; backupDir: string; stateDir: string }) {
+function configFor(temp: {
+	appDir: string;
+	backupDir: string;
+	stateDir: string;
+}) {
 	return loadDeployExecutorConfig({
 		DEPLOY_EXECUTOR_TOKEN: token,
 		DEPLOY_EXECUTOR_STATE_DIR: temp.stateDir,

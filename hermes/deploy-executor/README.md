@@ -6,6 +6,16 @@ deploy without exposing the Docker socket to Cloudflare Workers.
 The service only accepts one allowlisted public GitHub repository, one target,
 and immutable 40-character commit SHAs.
 
+The service runs as `debian:docker`. Keep the application and deployment state
+writable by that account, while keeping the environment file readable only by
+root and the Docker group:
+
+```sh
+sudo chown -R debian:docker /srv/hermes/app /srv/hermes/backups /srv/hermes/deploy-executor
+sudo chown root:docker /srv/hermes/app/env.local
+sudo chmod 0640 /srv/hermes/app/env.local
+```
+
 ## Environment
 
 Add these values to `/srv/hermes/app/env.local` on the VPS:
