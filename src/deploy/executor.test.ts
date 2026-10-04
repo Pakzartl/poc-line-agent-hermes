@@ -1,5 +1,9 @@
 import { describe, expect, test } from "bun:test";
-import { executeApprovedDeploy } from "./executor";
+import {
+	DeployExecutionRejectedError,
+	DeployExecutionUncertainError,
+	executeApprovedDeploy,
+} from "./executor";
 import { createDeployPlan, type DeployTarget } from "./plan";
 
 const targets: DeployTarget[] = [
@@ -46,6 +50,9 @@ describe("approved deploy executor", () => {
 		expect(request?.headers.get("Idempotency-Key")).toBe(plan.id);
 		const body = (await request?.json()) as Record<string, unknown>;
 		expect(body.commitSha).toBe("b".repeat(40));
+		expect(body.digest).toBe(plan.digest);
+		expect(body.targetId).toBe("staging");
+		expect(body.approvedBy).toBe("approver");
 		expect(body).not.toHaveProperty("command");
 	});
 
@@ -84,6 +91,70 @@ describe("approved deploy executor", () => {
 		});
 		expect(result.status).toBe("failed");
 		expect(result.artifact.rollbackGuidance).toBeDefined();
+	});
+
+	test("marks transport failure and invalid success responses as uncertain", async () => {
+		const plan = await createDeployPlan(
+			{
+				targetId: "staging",
+				repository: "owner/repo",
+				commitSha: "e".repeat(40),
+				requestedBy: "requester",
+			},
+			targets,
+		);
+		await expect(
+			executeApprovedDeploy({
+				plan,
+				targets,
+				approvedBy: "approver",
+				approvedDigest: plan.digest,
+				executorToken: "secret",
+				fetch: async () => {
+					throw new Error("socket closed");
+				},
+			}),
+		).rejects.toBeInstanceOf(DeployExecutionUncertainError);
+
+		await expect(
+			executeApprovedDeploy({
+				plan,
+				targets,
+				approvedBy: "approver",
+				approvedDigest: plan.digest,
+				executorToken: "secret",
+				fetch: async () => Response.json({ ok: true }),
+			}),
+		).rejects.toBeInstanceOf(DeployExecutionUncertainError);
+	});
+
+	test("treats executor 4xx rejection as non-retryable", async () => {
+		const plan = await createDeployPlan(
+			{
+				targetId: "staging",
+				repository: "owner/repo",
+				commitSha: "f".repeat(40),
+				requestedBy: "requester",
+			},
+			targets,
+		);
+		let error: unknown;
+		try {
+			await executeApprovedDeploy({
+				plan,
+				targets,
+				approvedBy: "approver",
+				approvedDigest: plan.digest,
+				executorToken: "secret",
+				fetch: async () =>
+					Response.json({ error: "invalid target" }, { status: 400 }),
+			});
+		} catch (caught) {
+			error = caught;
+		}
+		expect(error).toBeInstanceOf(DeployExecutionRejectedError);
+		expect((error as DeployExecutionRejectedError).retryable).toBe(false);
+		expect((error as DeployExecutionRejectedError).status).toBe(400);
 	});
 
 	test("blocks missing, expired, or mismatched approval", async () => {

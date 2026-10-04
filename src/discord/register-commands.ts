@@ -28,20 +28,6 @@ const questionOption = {
 
 export const discordCommands = [
 	{
-		name: "ask",
-		description: "Ask the Hermes agent a general question",
-		options: [
-			{
-				type: stringOptionType,
-				name: "question",
-				description: "What you want the agent to answer",
-				required: true,
-				min_length: 1,
-				max_length: 4_000,
-			},
-		],
-	},
-	{
 		name: "code",
 		description: "Inspect a GitHub repository and branch with Hermes",
 		options: [repositoryOption, branchOption, questionOption],

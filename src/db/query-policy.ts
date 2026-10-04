@@ -67,6 +67,9 @@ export function planReadOnlyQuery(input: {
 	if (disabled) {
 		return { ok: false, reason: disabled };
 	}
+	if (containsInvalidUnicode(input.sql)) {
+		return { ok: false, reason: "SQL contains invalid Unicode" };
+	}
 
 	const sql = normalizeSql(input.sql);
 	if (!sql) {
@@ -325,7 +328,28 @@ function isSafeScalar(value: string | number | boolean | null): boolean {
 	if (typeof value === "number") {
 		return Number.isFinite(value);
 	}
-	return value.length <= 4_000 && !/[\u0000-\u001f]/.test(value);
+	return (
+		value.length <= 4_000 &&
+		!/[\u0000-\u001f]/.test(value) &&
+		!containsInvalidUnicode(value)
+	);
+}
+
+function containsInvalidUnicode(value: string): boolean {
+	for (let index = 0; index < value.length; index += 1) {
+		const code = value.charCodeAt(index);
+		if (code === 0xfffd) return true;
+		if (code >= 0xd800 && code <= 0xdbff) {
+			const next = value.charCodeAt(index + 1);
+			if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
+				return true;
+			}
+			index += 1;
+			continue;
+		}
+		if (code >= 0xdc00 && code <= 0xdfff) return true;
+	}
+	return false;
 }
 
 type TableReference = {

@@ -17,21 +17,12 @@ export async function renderScreenshot(url: string): Promise<Uint8Array> {
 	const output = `/tmp/capability-${crypto.randomUUID()}.png`;
 	const profile = `/tmp/chromium-${crypto.randomUUID()}`;
 	const chromium = Bun.spawn(
-		[
-			process.env.CHROMIUM_BIN ?? "/usr/bin/chromium-headless-shell",
-			"--headless=new",
-			"--no-sandbox",
-			"--disable-dev-shm-usage",
-			"--disable-gpu",
-			"--hide-scrollbars",
-			`--user-data-dir=${profile}`,
-			`--disk-cache-dir=${profile}/cache`,
-			"--window-size=1440,900",
-			"--virtual-time-budget=5000",
-			`--host-resolver-rules=MAP ${parsed.hostname} ${pinnedAddress}, MAP * ~NOTFOUND`,
-			`--screenshot=${output}`,
-			parsed.toString(),
-		],
+		buildChromiumCommand({
+			url: parsed,
+			pinnedAddress,
+			output,
+			profile,
+		}),
 		{ stdout: "ignore", stderr: "pipe" },
 	);
 	let timeout: ReturnType<typeof setTimeout> | undefined;
@@ -64,4 +55,33 @@ export async function renderScreenshot(url: string): Promise<Uint8Array> {
 		await unlink(output).catch(() => undefined);
 		await rm(profile, { recursive: true, force: true }).catch(() => undefined);
 	}
+}
+
+export function buildChromiumCommand(input: {
+	url: URL;
+	pinnedAddress: string;
+	output: string;
+	profile: string;
+	chromiumBin?: string;
+}): string[] {
+	return [
+		input.chromiumBin ??
+			process.env.CHROMIUM_BIN ??
+			"/usr/bin/chromium-headless-shell",
+		"--headless=new",
+		// Chromium cannot initialize its setuid/user-namespace sandbox under the
+		// container's no-new-privileges policy. The dedicated sidecar is instead
+		// the security boundary: non-root, read-only, cap-drop ALL, bounded tmpfs.
+		"--no-sandbox",
+		"--disable-dev-shm-usage",
+		"--disable-gpu",
+		"--hide-scrollbars",
+		`--user-data-dir=${input.profile}`,
+		`--disk-cache-dir=${input.profile}/cache`,
+		"--window-size=1440,900",
+		"--virtual-time-budget=5000",
+		`--host-resolver-rules=MAP ${input.url.hostname} ${input.pinnedAddress}, MAP * ~NOTFOUND`,
+		`--screenshot=${input.output}`,
+		input.url.toString(),
+	];
 }

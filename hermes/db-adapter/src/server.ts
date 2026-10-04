@@ -1,7 +1,7 @@
 import { timingSafeEqual } from "node:crypto";
 import { type DbAdapterConfig, loadDbAdapterConfig } from "./config";
 import { type DbExecutor, executeWithPsql } from "./executor";
-import { validateDbReadRequest } from "./policy";
+import { containsInvalidUnicode, validateDbReadRequest } from "./policy";
 
 const maxRequestBytes = 32_768;
 
@@ -132,6 +132,9 @@ async function boundedText(
 	const body = await request.text();
 	if (new TextEncoder().encode(body).byteLength > maxRequestBytes) {
 		return { ok: false, status: 413, reason: "payload too large" };
+	}
+	if (containsInvalidUnicode(body)) {
+		return { ok: false, status: 400, reason: "payload has invalid encoding" };
 	}
 	return { ok: true, body };
 }

@@ -179,7 +179,22 @@ describe("Discord queued jobs", () => {
 				hermesClient: {
 					chat: async (input) => {
 						hermesInputs.push(input);
-						return { text: "Risk answer" };
+						return {
+							text: `## Summary
+Checkout risk.
+## Blast Radius
+- Learner checkout route
+## Evidence
+- \`apps/learner-gateway/src/checkout.ts:42\`
+## Risks
+- [high] Checkout failure: users may not complete payment.
+## Human Test Plan
+- Run checkout success and failure paths.
+## Evidence Gaps
+- Production payment configuration is external.
+## Recommended Action
+Approve after checkout tests pass.`,
+						};
 					},
 					listMessages: async () => [],
 					lastMessageMarker: async () => undefined,
@@ -201,9 +216,7 @@ describe("Discord queued jobs", () => {
 			},
 		);
 
-		expect(JSON.stringify(hermesInputs[0])).toContain(
-			"blast radius, side effects",
-		);
+		expect(JSON.stringify(hermesInputs[0])).toContain("## Blast Radius");
 		expect(JSON.stringify(hermesInputs[0])).toContain(
 			"compare_refs with base main and head dev",
 		);
@@ -216,7 +229,13 @@ describe("Discord queued jobs", () => {
 		expect(replyOptions.attachment?.data).toContain(
 			"- Capability: risk-assessment",
 		);
-		expect(replyOptions.attachment?.data).toContain("Verify blast radius");
+		expect(replyOptions.attachment?.data).toContain(
+			"apps/learner-gateway/src/checkout.ts:42",
+		);
+		expect(replyOptions.attachment?.data).toContain("Checkout failure");
+		expect(replyOptions.attachment?.data).toContain(
+			"Run checkout success and failure paths.",
+		);
 	});
 
 	test("returns a deploy plan with approval buttons without executing it", async () => {
@@ -425,6 +444,16 @@ describe("Discord queued jobs", () => {
 			},
 		});
 		expect(replies[0]?.[2]).toContain("exec-1");
+		const options = replies[0]?.[3] as {
+			attachment?: { data: string };
+		};
+		expect(options.attachment?.data).toContain(
+			`"planDigest": "${deployPlan.digest}"`,
+		);
+		expect(options.attachment?.data).toContain('"approvedBy": "user"');
+		expect(options.attachment?.data).toContain(
+			'"rollbackRequiresSeparateApproval": true',
+		);
 		expect((await store.getJob("original-request"))?.status).toBe("completed");
 	});
 

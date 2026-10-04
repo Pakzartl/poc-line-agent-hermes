@@ -1,8 +1,5 @@
 import { timingSafeEqual } from "node:crypto";
-import {
-	loadDeployExecutorConfig,
-	type DeployExecutorConfig,
-} from "./config";
+import { loadDeployExecutorConfig, type DeployExecutorConfig } from "./config";
 import {
 	DeployConflictError,
 	DeployInputError,
@@ -47,7 +44,10 @@ export function createDeployExecutorHandler(input: {
 			request.headers.get("idempotency-key"),
 		);
 		if (!deployRequest) {
-			return Response.json({ error: "invalid deploy request" }, { status: 400 });
+			return Response.json(
+				{ error: "invalid deploy request" },
+				{ status: 400 },
+			);
 		}
 		try {
 			const result = await deployWithIdempotency({
@@ -77,7 +77,10 @@ export function createDeployExecutorHandler(input: {
 					error: error instanceof Error ? error.message : "unknown error",
 				}),
 			);
-			return Response.json({ error: "deploy executor failed" }, { status: 500 });
+			return Response.json(
+				{ error: "deploy executor failed" },
+				{ status: 500 },
+			);
 		}
 	};
 }

@@ -1,7 +1,13 @@
 import { describe, expect, test } from "bun:test";
 import type { DiscordReplyClient } from "../discord/reply";
+import type { TelegramCoordinatorRecord } from "../telegram/session-coordinator";
+import type { TelegramUpdateStore } from "../telegram/update-store";
 import { createKvTelegramUpdateStore } from "../telegram/update-store";
-import { handleQueueFailureEvent } from "./queue-failure-handler";
+import { createQueueFailureArtifactResult } from "./queue-failure";
+import {
+	handleQueueFailureEvent,
+	publishQueueFailureArtifact,
+} from "./queue-failure-handler";
 
 describe("queue failure HTTP handler", () => {
 	test("publishes one visible Discord HIL artifact and deduplicates retries", async () => {
@@ -152,7 +158,93 @@ describe("queue failure HTTP handler", () => {
 		);
 		expect(tampered.status).toBe(401);
 	});
+
+	test("resumes a checkpointed Discord delivery without duplicating a completed artifact", async () => {
+		let record: TelegramCoordinatorRecord | undefined;
+		let deliveryAttempts = 0;
+		const store: TelegramUpdateStore = {
+			claim: async (input) => {
+				if (record) return { claimed: false, duplicate: true, record };
+				record = coordinatorRecord(
+					input.idempotencyKey,
+					input.providerSessionId,
+				);
+				return { claimed: true, duplicate: false, record };
+			},
+			dispatchLease: async () => {
+				record = { ...record!, status: "dispatched" };
+				return { kind: "leased", record };
+			},
+			beginReply: async (input) => {
+				record = {
+					...record!,
+					status: "replying",
+					replyContent: input.replyContent,
+					replyContentHash: input.replyContentHash,
+				};
+				return { kind: "ready", record };
+			},
+			complete: async () => {
+				record = { ...record!, status: "completed" };
+			},
+			fail: async () => undefined,
+			markUncertain: async () => undefined,
+			release: async () => undefined,
+			retryPreReply: async () => undefined,
+		};
+		const result = await createQueueFailureArtifactResult({
+			version: "queue-failure/v1",
+			eventId: "evt-retry",
+			queue: "jobs",
+			jobName: "sync",
+			failedAt: "2026-10-04T00:00:00.000Z",
+			attempts: 3,
+			error: { message: "timeout" },
+		});
+		const deps = {
+			discordChannelId: "channel-1",
+			discordReplyClient: {
+				reply: async () => undefined,
+				replyToChannel: async () => {
+					deliveryAttempts += 1;
+					if (deliveryAttempts === 1) throw new Error("Discord unavailable");
+				},
+				sendTyping: async () => undefined,
+			} satisfies DiscordReplyClient,
+			updateStore: store,
+		};
+
+		await expect(publishQueueFailureArtifact(result, deps)).rejects.toThrow(
+			"Discord unavailable",
+		);
+		expect(record?.status).toBe("replying");
+		expect((await publishQueueFailureArtifact(result, deps)).duplicate).toBe(
+			false,
+		);
+		expect(record?.status).toBe("completed");
+		expect((await publishQueueFailureArtifact(result, deps)).duplicate).toBe(
+			true,
+		);
+		expect(deliveryAttempts).toBe(2);
+	});
 });
+
+function coordinatorRecord(
+	key: string,
+	providerSessionId: string,
+): TelegramCoordinatorRecord {
+	return {
+		version: 1,
+		status: "claimed",
+		key,
+		sessionSequence: 1,
+		generation: "generation-1",
+		providerSessionId,
+		canonicalInputHash: key,
+		attemptCount: 0,
+		expiresAt: "2026-10-05T00:00:00.000Z",
+	};
+}
 
 async function sign(
 	body: string,

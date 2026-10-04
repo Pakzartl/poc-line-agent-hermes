@@ -7,8 +7,10 @@ import {
 	renderHilArtifactMarkdown,
 	safeArtifactFilename,
 } from "../capabilities/artifact";
+import { buildRiskAssessmentArtifact } from "../capabilities/risk-artifact";
 import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
+import { renderSkillContractInventory } from "../capabilities/skill-contract";
 import type { AppConfig } from "../config";
 import type { DatabaseReadClient, DatabaseReadResult } from "../db/client";
 import type {
@@ -18,6 +20,7 @@ import type {
 import { verifyNaturalLanguageDatabaseQueryPlan } from "../db/nl-planner";
 import {
 	type DeployExecutionResult,
+	DeployExecutionRejectedError,
 	DeployExecutionUncertainError,
 	executeApprovedDeploy,
 } from "../deploy/executor";
@@ -330,13 +333,15 @@ async function answerQuestion(
 			text: [
 				"Javis is online.",
 				`Runtime: ${route}`,
-				"Available Discord commands: /ask, /code, /risk, /db, /artifact, /deploy, /status, /skills, /clear",
+				"Available Discord commands: /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, /clear",
 				"Safety: deploy is approval-gated; database requests do not execute live SQL unless a read-only DB tool is configured.",
 			].join("\n"),
 		};
 	}
 	if (job.action === "skills") {
-		return { text: renderCapabilityList() };
+		return {
+			text: `${renderCapabilityList()}\n\n${renderSkillContractInventory()}`,
+		};
 	}
 	if (job.capability?.kind === "artifact_request") {
 		return captureArtifact(job, deps, sessionId, route);
@@ -1043,7 +1048,16 @@ Prepare a deployment plan only. Do not deploy automatically. Include target, com
 
 ${evidenceScope}
 
-Please inspect the implementation/deployment impact. Include blast radius, side effects, files/functions affected, where humans should test, and a concise approval recommendation.`,
+Please inspect the implementation/deployment impact. Return Markdown using these exact headings:
+## Summary
+## Blast Radius
+## Evidence
+## Risks
+## Human Test Plan
+## Evidence Gaps
+## Recommended Action
+
+Use repository-relative paths in Evidence. Prefix every risk with [critical], [high], [medium], [low], or [info]. Include concrete required human tests and never claim deployment state from source alone.`,
 		});
 	}
 	if (job.capability?.kind === "deploy_request") {
@@ -1081,141 +1095,161 @@ function buildDiscordArtifactAttachment(
 	}
 	const capability = capabilityName(job);
 	const createdAt = new Date().toISOString();
-	const artifact: HilArtifactV1 = {
-		version: hilArtifactVersion,
-		artifactId: `artifact_${job.interactionId}`,
-		title:
-			capability === "risk-assessment"
-				? `Risk Assessment: ${job.repository}@${job.branch}`
-				: capability === "ask-database"
-					? "Database Question"
-					: capability === "ask-artifact"
-						? "Requested Artifact"
-						: capability === "deploy"
-							? "Deployment Plan"
-							: `Code Investigation: ${job.repository}@${job.branch}`,
-		capability,
-		status: "completed",
-		objective: job.question ?? job.text,
-		source: {
-			kind:
-				capability === "ask-database"
-					? "database"
-					: capability === "deploy"
-						? "deployment"
-						: "code",
-			...(job.repository ? { repository: job.repository } : {}),
-			...(job.branch ? { branch: job.branch } : {}),
-		},
-		evidence: [
-			{
-				label: "Hermes response",
-				summary:
-					answer.length > 500 ? `${answer.slice(0, 497).trimEnd()}...` : answer,
-				source: "hermes",
-			},
-		],
-		findings: [
-			{
-				title: "Agent summary",
-				summary: answer,
-				severity: capability === "risk-assessment" ? "medium" : "info",
-			},
-		],
-		risks:
-			capability === "risk-assessment"
-				? [
+	const artifact: HilArtifactV1 =
+		capability === "risk-assessment" && job.repository && job.branch
+			? buildRiskAssessmentArtifact({
+					artifactId: `artifact_${job.interactionId}`,
+					objective: job.question ?? job.text,
+					repository: job.repository,
+					branch: job.branch,
+					answer,
+					createdAt,
+					baseRef:
+						job.capability?.kind === "risk_assessment"
+							? job.capability.baseRef
+							: undefined,
+					pullRequest:
+						job.capability?.kind === "risk_assessment"
+							? job.capability.pullRequest
+							: undefined,
+				})
+			: {
+					version: hilArtifactVersion,
+					artifactId: `artifact_${job.interactionId}`,
+					title:
+						capability === "risk-assessment"
+							? `Risk Assessment: ${job.repository}@${job.branch}`
+							: capability === "ask-database"
+								? "Database Question"
+								: capability === "ask-artifact"
+									? "Requested Artifact"
+									: capability === "deploy"
+										? "Deployment Plan"
+										: `Code Investigation: ${job.repository}@${job.branch}`,
+					capability,
+					status: "completed",
+					objective: job.question ?? job.text,
+					source: {
+						kind:
+							capability === "ask-database"
+								? "database"
+								: capability === "deploy"
+									? "deployment"
+									: "code",
+						...(job.repository ? { repository: job.repository } : {}),
+						...(job.branch ? { branch: job.branch } : {}),
+					},
+					evidence: [
 						{
-							title: "Requires human verification",
-							impact:
-								"AI assessment may miss runtime, infrastructure, or production-only behavior.",
-							likelihood: "medium",
-							mitigation:
-								"Run the human test plan and review affected files before approval.",
+							label: "Hermes response",
+							summary:
+								answer.length > 500
+									? `${answer.slice(0, 497).trimEnd()}...`
+									: answer,
+							source: "hermes",
 						},
-					]
-				: capability === "ask-database"
-					? [
-							{
-								title: "Bounded read-only result",
-								impact:
-									"The result may be truncated, masked, or stale by the time a human acts on it.",
-								likelihood: "medium",
-								mitigation:
-									"Verify datasource, fingerprint, duration, row count, truncation, and masked fields in the attached result artifact.",
-							},
-						]
-					: capability === "deploy"
-						? [
-								{
-									title: "Mutation requires approval",
-									impact:
-										"Deployment changes external state and may affect availability.",
-									likelihood: "medium",
-									mitigation:
-										"Require explicit approval, health checks, and rollback path before deploy.",
-								},
-							]
-						: [],
-		humanActions:
-			capability === "risk-assessment"
-				? [
+					],
+					findings: [
 						{
-							label: "Verify blast radius",
-							description:
-								"Confirm affected routes, services, jobs, database writes, and external integrations.",
-							required: true,
+							title: "Agent summary",
+							summary: answer,
+							severity: capability === "risk-assessment" ? "medium" : "info",
 						},
-						{
-							label: "Run targeted tests",
-							description:
-								"Execute the manual or automated checks recommended by the agent.",
-							required: true,
+					],
+					risks:
+						capability === "risk-assessment"
+							? [
+									{
+										title: "Requires human verification",
+										impact:
+											"AI assessment may miss runtime, infrastructure, or production-only behavior.",
+										likelihood: "medium",
+										mitigation:
+											"Run the human test plan and review affected files before approval.",
+									},
+								]
+							: capability === "ask-database"
+								? [
+										{
+											title: "Bounded read-only result",
+											impact:
+												"The result may be truncated, masked, or stale by the time a human acts on it.",
+											likelihood: "medium",
+											mitigation:
+												"Verify datasource, fingerprint, duration, row count, truncation, and masked fields in the attached result artifact.",
+										},
+									]
+								: capability === "deploy"
+									? [
+											{
+												title: "Mutation requires approval",
+												impact:
+													"Deployment changes external state and may affect availability.",
+												likelihood: "medium",
+												mitigation:
+													"Require explicit approval, health checks, and rollback path before deploy.",
+											},
+										]
+									: [],
+					humanActions:
+						capability === "risk-assessment"
+							? [
+									{
+										label: "Verify blast radius",
+										description:
+											"Confirm affected routes, services, jobs, database writes, and external integrations.",
+										required: true,
+									},
+									{
+										label: "Run targeted tests",
+										description:
+											"Execute the manual or automated checks recommended by the agent.",
+										required: true,
+									},
+								]
+							: capability === "ask-database"
+								? [
+										{
+											label: "Review query provenance",
+											description:
+												"Confirm datasource, SQL fingerprint, allowlisted tables, truncation, and PII masking before using the result.",
+											required: true,
+										},
+									]
+								: capability === "deploy"
+									? [
+											{
+												label: "Approve deployment target",
+												description:
+													"Confirm target environment, ref, checks, and rollback path before deployment.",
+												required: true,
+											},
+										]
+									: [
+											{
+												label: "Review cited files",
+												description:
+													"Open the files and paths cited in the response before relying on the conclusion.",
+												required: false,
+											},
+										],
+					recommendedAction:
+						capability === "risk-assessment"
+							? "Approve only after the human verification actions pass."
+							: capability === "ask-database"
+								? "Use the attached result only after reviewing its bounded-query provenance and limitations."
+								: capability === "deploy"
+									? "Treat this as a deployment plan, not deployment approval."
+									: "Use this artifact as an investigation handoff with cited evidence.",
+					metadata: {
+						createdAt,
+						correlationId: job.interactionId,
+						inputs: {
+							interactionId: job.interactionId,
+							delivery: job.delivery ?? "interaction",
 						},
-					]
-				: capability === "ask-database"
-					? [
-							{
-								label: "Review query provenance",
-								description:
-									"Confirm datasource, SQL fingerprint, allowlisted tables, truncation, and PII masking before using the result.",
-								required: true,
-							},
-						]
-					: capability === "deploy"
-						? [
-								{
-									label: "Approve deployment target",
-									description:
-										"Confirm target environment, ref, checks, and rollback path before deployment.",
-									required: true,
-								},
-							]
-						: [
-								{
-									label: "Review cited files",
-									description:
-										"Open the files and paths cited in the response before relying on the conclusion.",
-									required: false,
-								},
-							],
-		recommendedAction:
-			capability === "risk-assessment"
-				? "Approve only after the human verification actions pass."
-				: capability === "ask-database"
-					? "Use the attached result only after reviewing its bounded-query provenance and limitations."
-					: capability === "deploy"
-						? "Treat this as a deployment plan, not deployment approval."
-						: "Use this artifact as an investigation handoff with cited evidence.",
-		metadata: {
-			createdAt,
-			correlationId: job.interactionId,
-			inputs: {
-				interactionId: job.interactionId,
-				delivery: job.delivery ?? "interaction",
-			},
-		},
-	};
+					},
+				};
 	return {
 		filename: safeArtifactFilename({
 			title: artifact.title,
@@ -1397,6 +1431,9 @@ function selectDiscordRuntime(
 
 function isRetryableJobError(error: unknown): boolean {
 	if (error instanceof DiscordManualInterventionError) {
+		return error.retryable;
+	}
+	if (error instanceof DeployExecutionRejectedError) {
 		return error.retryable;
 	}
 	if (error instanceof DiscordApiError) {

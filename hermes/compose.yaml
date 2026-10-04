@@ -58,6 +58,7 @@ services:
       context: ./capability-adapter
     container_name: poc-line-agent-capability-adapter
     platform: linux/amd64
+    user: "1000:1000"
     restart: unless-stopped
     env_file:
       - path: ./env.local
@@ -73,6 +74,7 @@ services:
       - no-new-privileges:true
     cap_drop:
       - ALL
+    pids_limit: 128
     healthcheck:
       test: ["CMD", "bun", "-e", "const r=await fetch('http://127.0.0.1:8788/health'); if(!r.ok) process.exit(1)"]
       interval: 30s

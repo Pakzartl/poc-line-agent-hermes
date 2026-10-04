@@ -1,6 +1,7 @@
 import { parseScreenshotTargets } from "../artifacts/request";
 import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
+import { renderSkillContractInventory } from "../capabilities/skill-contract";
 import type { AppConfig } from "../config";
 import {
 	planNaturalLanguageDatabaseQuery,
@@ -765,23 +766,6 @@ function parseCommand(
 			},
 		};
 	}
-	if (command === "ask") {
-		const question = stringOption(options, "question")?.trim();
-		if (!question) {
-			return { ok: false, error: "The question option is required." };
-		}
-		return {
-			ok: true,
-			kind: "job",
-			job: {
-				...base,
-				providerSessionId: sessionId,
-				action: "chat",
-				text: question,
-				question,
-			},
-		};
-	}
 	if (command === "code") {
 		const scope = parseSourceScopeOptions(options);
 		if (!scope.ok) {
@@ -996,12 +980,16 @@ function parseCommand(
 		};
 	}
 	if (command === "skills") {
-		return { ok: true, kind: "immediate", content: renderCapabilityList() };
+		return {
+			ok: true,
+			kind: "immediate",
+			content: `${renderCapabilityList()}\n\n${renderSkillContractInventory()}`,
+		};
 	}
 	return {
 		ok: false,
 		error:
-			"Unknown command. Use /ask, /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, or /clear.",
+			"Unknown command. Use /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, or /clear.",
 	};
 }
 

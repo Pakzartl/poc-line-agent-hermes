@@ -6,6 +6,7 @@ RUN apt-get update \
 
 WORKDIR /app
 COPY src ./src
+COPY verify-readonly-role.sh ./verify-readonly-role.sh
 
 USER bun
 EXPOSE 8789

@@ -33,6 +33,7 @@ export type HilArtifactFinding = {
 export type HilArtifactRisk = {
 	title: string;
 	impact: string;
+	severity?: HilArtifactSeverity;
 	likelihood?: "low" | "medium" | "high";
 	mitigation?: string;
 };
@@ -79,7 +80,7 @@ export type HilArtifactV1 = {
 
 export function renderHilArtifactMarkdown(artifact: HilArtifactV1): string {
 	const lines = [
-		`# ${artifact.title}`,
+		`# ${redactArtifactText(artifact.title)}`,
 		"",
 		`- Version: ${artifact.version}`,
 		`- Artifact ID: ${artifact.artifactId}`,
@@ -92,7 +93,7 @@ export function renderHilArtifactMarkdown(artifact: HilArtifactV1): string {
 		"",
 		"## Objective",
 		"",
-		artifact.objective,
+		redactArtifactText(artifact.objective),
 		"",
 		"## Source",
 		"",
@@ -114,7 +115,12 @@ export function renderHilArtifactMarkdown(artifact: HilArtifactV1): string {
 		"",
 		...renderHumanActions(artifact.humanActions),
 		...(artifact.recommendedAction
-			? ["", "## Recommended Action", "", artifact.recommendedAction]
+			? [
+					"",
+					"## Recommended Action",
+					"",
+					redactArtifactText(artifact.recommendedAction),
+				]
 			: []),
 		"",
 		"## Metadata",
@@ -122,6 +128,15 @@ export function renderHilArtifactMarkdown(artifact: HilArtifactV1): string {
 		...renderMetadata(artifact.metadata),
 	];
 	return `${lines.join("\n").trimEnd()}\n`;
+}
+
+export function redactArtifactText(value: string): string {
+	return value
+		.replace(
+			/\b(authorization|token|secret|password|api[_-]?key|credential)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+/gi,
+			"$1=[redacted]",
+		)
+		.replace(/\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/gi, "[redacted-email]");
 }
 
 export function safeArtifactFilename(input: {
@@ -151,7 +166,9 @@ export function safeArtifactFilename(input: {
 function renderSource(source: HilArtifactSource): string[] {
 	return Object.entries(source)
 		.filter(([, value]) => value !== undefined && value !== "")
-		.map(([key, value]) => `- ${label(key)}: ${String(value)}`);
+		.map(
+			([key, value]) => `- ${label(key)}: ${redactArtifactText(String(value))}`,
+		);
 }
 
 function renderEvidence(evidence: readonly HilArtifactEvidence[]): string[] {
@@ -159,9 +176,11 @@ function renderEvidence(evidence: readonly HilArtifactEvidence[]): string[] {
 		return ["- No evidence captured."];
 	}
 	return evidence.flatMap((item) => [
-		`- ${item.label}: ${item.summary}`,
-		...(item.source ? [`  - Source: ${item.source}`] : []),
-		...(item.path ? [`  - Path: ${item.path}${lineSuffix(item.line)}`] : []),
+		`- ${redactArtifactText(item.label)}: ${redactArtifactText(item.summary)}`,
+		...(item.source ? [`  - Source: ${redactArtifactText(item.source)}`] : []),
+		...(item.path
+			? [`  - Path: ${redactArtifactText(item.path)}${lineSuffix(item.line)}`]
+			: []),
 	]);
 }
 
@@ -170,9 +189,9 @@ function renderFindings(findings: readonly HilArtifactFinding[]): string[] {
 		return ["- No findings."];
 	}
 	return findings.flatMap((finding) => [
-		`- ${finding.severity ? `[${finding.severity}] ` : ""}${finding.title}: ${finding.summary}`,
+		`- ${finding.severity ? `[${finding.severity}] ` : ""}${redactArtifactText(finding.title)}: ${redactArtifactText(finding.summary)}`,
 		...(finding.evidence?.length
-			? [`  - Evidence: ${finding.evidence.join(", ")}`]
+			? [`  - Evidence: ${finding.evidence.map(redactArtifactText).join(", ")}`]
 			: []),
 	]);
 }
@@ -182,9 +201,11 @@ function renderRisks(risks: readonly HilArtifactRisk[]): string[] {
 		return ["- No risks identified."];
 	}
 	return risks.flatMap((risk) => [
-		`- ${risk.title}: ${risk.impact}`,
+		`- ${risk.severity ? `[${risk.severity}] ` : ""}${redactArtifactText(risk.title)}: ${redactArtifactText(risk.impact)}`,
 		...(risk.likelihood ? [`  - Likelihood: ${risk.likelihood}`] : []),
-		...(risk.mitigation ? [`  - Mitigation: ${risk.mitigation}`] : []),
+		...(risk.mitigation
+			? [`  - Mitigation: ${redactArtifactText(risk.mitigation)}`]
+			: []),
 	]);
 }
 
@@ -196,17 +217,20 @@ function renderHumanActions(
 	}
 	return actions.map(
 		(action) =>
-			`- ${action.required ? "[required] " : ""}${action.label}: ${action.description}`,
+			`- ${action.required ? "[required] " : ""}${redactArtifactText(action.label)}: ${redactArtifactText(action.description)}`,
 	);
 }
 
 function renderMetadata(metadata: HilArtifactMetadata): string[] {
 	const rows = [
-		`- Owner: ${metadata.owner ?? "unassigned"}`,
-		...(metadata.tags?.length ? [`- Tags: ${metadata.tags.join(", ")}`] : []),
+		`- Owner: ${redactArtifactText(metadata.owner ?? "unassigned")}`,
+		...(metadata.tags?.length
+			? [`- Tags: ${metadata.tags.map(redactArtifactText).join(", ")}`]
+			: []),
 		...(metadata.inputs
 			? Object.entries(metadata.inputs).map(
-					([key, value]) => `- Input ${key}: ${String(value)}`,
+					([key, value]) =>
+						`- Input ${key}: ${redactArtifactText(String(value))}`,
 				)
 			: []),
 	];

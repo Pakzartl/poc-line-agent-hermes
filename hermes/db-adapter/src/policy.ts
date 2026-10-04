@@ -78,7 +78,11 @@ export function validateDbReadRequest(
 	if (!datasourcePolicy) {
 		return reject(404, "datasource is not configured");
 	}
-	const sql = normalizeSql(stringField(record, "sql"));
+	const rawSql = stringField(record, "sql");
+	if (containsInvalidUnicode(rawSql)) {
+		return reject(400, "SQL contains invalid Unicode");
+	}
+	const sql = normalizeSql(rawSql);
 	if (!sql) {
 		return reject(400, "SQL is required");
 	}
@@ -364,8 +368,26 @@ function isSafeScalar(
 	return (
 		typeof value === "string" &&
 		value.length <= 4_000 &&
-		!containsControlCharacter(value)
+		!containsControlCharacter(value) &&
+		!containsInvalidUnicode(value)
 	);
+}
+
+export function containsInvalidUnicode(value: string): boolean {
+	for (let index = 0; index < value.length; index += 1) {
+		const code = value.charCodeAt(index);
+		if (code === 0xfffd) return true;
+		if (code >= 0xd800 && code <= 0xdbff) {
+			const next = value.charCodeAt(index + 1);
+			if (index + 1 >= value.length || next < 0xdc00 || next > 0xdfff) {
+				return true;
+			}
+			index += 1;
+			continue;
+		}
+		if (code >= 0xdc00 && code <= 0xdfff) return true;
+	}
+	return false;
 }
 
 function containsControlCharacter(value: string): boolean {

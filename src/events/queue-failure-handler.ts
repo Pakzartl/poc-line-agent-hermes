@@ -5,7 +5,10 @@ import {
 } from "../capabilities/artifact";
 import type { DiscordReplyClient } from "../discord/reply";
 import type { TelegramUpdateStore } from "../telegram/update-store";
-import { ingestQueueFailureEvent } from "./queue-failure";
+import {
+	type QueueFailureArtifactResult,
+	ingestQueueFailureEvent,
+} from "./queue-failure";
 
 export type QueueFailureHandlerDeps = {
 	secret: string;
@@ -35,8 +38,29 @@ export async function handleQueueFailureEvent(
 		return Response.json({ error: result.error }, { status: result.status });
 	}
 
+	const delivery = await publishQueueFailureArtifact(result, deps);
+	return Response.json(
+		{
+			accepted: true,
+			...delivery,
+			artifact: result.artifact,
+		},
+		{ status: 202 },
+	);
+}
+
+export async function publishQueueFailureArtifact(
+	result: QueueFailureArtifactResult,
+	deps: Omit<QueueFailureHandlerDeps, "secret">,
+): Promise<{
+	duplicate: boolean;
+	artifactId: string;
+	postedToDiscord: boolean;
+}> {
 	const providerSessionId = `discord:event:queue-failure:${deps.discordChannelId || "http"}`;
 	const idempotencyKey = `queue-failure:${result.idempotencyKey}`;
+	const markdown = renderHilArtifactMarkdown(result.artifact);
+	const replyHash = await sha256(markdown);
 	const claim = await deps.updateStore.claim({
 		providerSessionId,
 		idempotencyKey,
@@ -44,10 +68,28 @@ export async function handleQueueFailureEvent(
 		updateId: result.artifact.source.eventId ?? result.idempotencyKey,
 	});
 	if (!claim.claimed) {
-		return Response.json(
-			{ accepted: true, duplicate: true, artifactId: idempotencyKey },
-			{ status: 202 },
-		);
+		if (
+			claim.record?.status === "replying" &&
+			claim.record.replyContentHash === replyHash &&
+			claim.record.replyContent === markdown
+		) {
+			await deliverQueueFailureArtifact(result.artifact, markdown, deps);
+			await deps.updateStore.complete({
+				providerSessionId,
+				idempotencyKey,
+				replyContentHash: replyHash,
+			});
+			return {
+				duplicate: false,
+				artifactId: idempotencyKey,
+				postedToDiscord: Boolean(deps.discordChannelId),
+			};
+		}
+		return {
+			duplicate: true,
+			artifactId: idempotencyKey,
+			postedToDiscord: false,
+		};
 	}
 	const lease = await deps.updateStore.dispatchLease({
 		providerSessionId,
@@ -58,68 +100,56 @@ export async function handleQueueFailureEvent(
 		updateId: result.artifact.source.eventId ?? result.idempotencyKey,
 	});
 	if (lease.kind !== "leased") {
-		return Response.json(
-			{ accepted: true, duplicate: true, artifactId: idempotencyKey },
-			{ status: 202 },
-		);
-	}
-
-	const markdown = renderHilArtifactMarkdown(result.artifact);
-	const replyHash = await sha256(markdown);
-	try {
-		const checkpoint = await deps.updateStore.beginReply({
-			providerSessionId,
-			idempotencyKey,
-			replyContent: markdown,
-			replyContentHash: replyHash,
-		});
-		if (checkpoint.kind !== "ready") {
-			throw new Error("queue failure artifact reply checkpoint is not ready");
-		}
-		if (deps.discordChannelId) {
-			await deps.discordReplyClient.replyToChannel(
-				deps.discordChannelId,
-				queueFailureSummary(result.artifact),
-				undefined,
-				{
-					attachment: {
-						filename: safeArtifactFilename({
-							title: result.artifact.title,
-							capability: result.artifact.capability,
-							createdAt: result.artifact.metadata.createdAt,
-						}),
-						contentType: "text/markdown; charset=utf-8",
-						data: markdown,
-					},
-				},
-			);
-		}
-		await deps.updateStore.complete({
-			providerSessionId,
-			idempotencyKey,
-			replyContentHash: replyHash,
-		});
-	} catch (error) {
-		await deps.updateStore.fail({
-			providerSessionId,
-			idempotencyKey,
-			terminalReason:
-				error instanceof Error
-					? error.message
-					: "queue failure delivery failed",
-		});
-		throw error;
-	}
-
-	return Response.json(
-		{
-			accepted: true,
-			duplicate: false,
+		return {
+			duplicate: true,
 			artifactId: idempotencyKey,
-			postedToDiscord: Boolean(deps.discordChannelId),
-			artifact: result.artifact,
+			postedToDiscord: false,
+		};
+	}
+
+	const checkpoint = await deps.updateStore.beginReply({
+		providerSessionId,
+		idempotencyKey,
+		replyContent: markdown,
+		replyContentHash: replyHash,
+	});
+	if (checkpoint.kind !== "ready") {
+		throw new Error("queue failure artifact reply checkpoint is not ready");
+	}
+	await deliverQueueFailureArtifact(result.artifact, markdown, deps);
+	await deps.updateStore.complete({
+		providerSessionId,
+		idempotencyKey,
+		replyContentHash: replyHash,
+	});
+	return {
+		duplicate: false,
+		artifactId: idempotencyKey,
+		postedToDiscord: Boolean(deps.discordChannelId),
+	};
+}
+
+async function deliverQueueFailureArtifact(
+	artifact: HilArtifactV1,
+	markdown: string,
+	deps: Omit<QueueFailureHandlerDeps, "secret">,
+): Promise<void> {
+	if (!deps.discordChannelId) return;
+	await deps.discordReplyClient.replyToChannel(
+		deps.discordChannelId,
+		queueFailureSummary(artifact),
+		undefined,
+		{
+			attachment: {
+				filename: safeArtifactFilename({
+					title: artifact.title,
+					capability: artifact.capability,
+					createdAt: artifact.metadata.createdAt,
+				}),
+				contentType: "text/markdown; charset=utf-8",
+				data: markdown,
+			},
 		},
-		{ status: 202 },
 	);
 }
 

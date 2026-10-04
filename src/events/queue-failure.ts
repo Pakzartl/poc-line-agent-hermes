@@ -39,6 +39,11 @@ export type QueueFailureIngestResult =
 	| { ok: true; idempotencyKey: string; artifact: HilArtifactV1 }
 	| { ok: false; status: number; error: string };
 
+export type QueueFailureArtifactResult = Extract<
+	QueueFailureIngestResult,
+	{ ok: true }
+>;
+
 const maxBodyBytes = 64_000;
 const maxText = 1_200;
 const maxArrayItems = 5;
@@ -88,13 +93,20 @@ export async function ingestQueueFailureEvent(input: {
 	if (!event.ok) {
 		return { ok: false, status: 400, error: event.error };
 	}
+	return createQueueFailureArtifactResult(event.value, now);
+}
+
+export async function createQueueFailureArtifactResult(
+	event: QueueFailureEventV1,
+	now = new Date(),
+): Promise<QueueFailureArtifactResult> {
 	const idempotencyKey = await sha256(
-		`${event.value.version}:${event.value.queue}:${event.value.jobName}:${event.value.eventId}`,
+		`${event.version}:${event.queue}:${event.jobName}:${event.eventId}`,
 	);
 	return {
 		ok: true,
 		idempotencyKey,
-		artifact: buildQueueFailureArtifact(event.value, {
+		artifact: buildQueueFailureArtifact(event, {
 			idempotencyKey,
 			now,
 		}),

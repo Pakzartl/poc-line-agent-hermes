@@ -3,6 +3,10 @@ import { createAppDeps, createAppHandler } from "./app";
 import { createDurableObjectCapabilityJobStore } from "./capabilities/job-store";
 import { loadConfig, validateConfig } from "./config";
 import { processDiscordQueueMessage, type DiscordJob } from "./discord/job";
+import {
+	processQueueFailureDlqMessage,
+	queueFailureDlqName,
+} from "./events/queue-failure-dlq";
 import { createKvSessionMemoryStore } from "./memory/kv-session-memory";
 import apiCatalogSkill from "./skills/api-catalog.md";
 import architectureMapSkill from "./skills/architecture-map.md";
@@ -78,6 +82,23 @@ export default {
 	},
 	async queue(batch, env): Promise<void> {
 		const deps = createWorkerDeps(env);
+		if (batch.queue === queueFailureDlqName) {
+			for (const message of batch.messages) {
+				await processQueueFailureDlqMessage({
+					messageId: message.id,
+					body: message.body,
+					attempts: message.attempts,
+					deps: {
+						discordChannelId:
+							deps.config.events?.queueFailureDiscordChannelId ?? "",
+						discordReplyClient: deps.discordReplyClient,
+						updateStore: deps.discordUpdateStore,
+					},
+				});
+				message.ack();
+			}
+			return;
+		}
 		for (const message of batch.messages) {
 			if (isDiscordQueueEnvelope(message.body)) {
 				await processDiscordQueueMessage(

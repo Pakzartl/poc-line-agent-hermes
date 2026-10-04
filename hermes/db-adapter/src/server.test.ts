@@ -168,6 +168,48 @@ describe("db adapter", () => {
 		}
 	});
 
+	test("rejects invalid request and SQL encodings before execution", async () => {
+		let executeCalls = 0;
+		const handler = createDbAdapterHandler({
+			config,
+			execute: async () => {
+				executeCalls += 1;
+				return { rows: [] };
+			},
+		});
+		const invalidSql = await handler(
+			new Request("http://db.test/db/query", {
+				method: "POST",
+				headers: auth,
+				body: JSON.stringify(
+					validBody({ sql: "SELECT '\ud800' FROM public.users" }),
+				),
+			}),
+		);
+		expect(invalidSql.status).toBe(400);
+
+		const prefix = new TextEncoder().encode(
+			JSON.stringify(validBody({ params: ["marker"] })).replace("marker", ""),
+		);
+		const markerAt =
+			new TextDecoder().decode(prefix).indexOf('"params":[""]') + 11;
+		const before = prefix.slice(0, markerAt);
+		const after = prefix.slice(markerAt);
+		const invalidBody = new Uint8Array(before.length + 1 + after.length);
+		invalidBody.set(before);
+		invalidBody[before.length] = 0xff;
+		invalidBody.set(after, before.length + 1);
+		const invalidEncoding = await handler(
+			new Request("http://db.test/db/query", {
+				method: "POST",
+				headers: auth,
+				body: invalidBody,
+			}),
+		);
+		expect(invalidEncoding.status).toBe(400);
+		expect(executeCalls).toBe(0);
+	});
+
 	test("rejects oversized payloads, unconfigured datasources, limit escalation, and fingerprint mismatch", async () => {
 		const handler = createDbAdapterHandler({
 			config,

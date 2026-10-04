@@ -77,6 +77,17 @@ Secrets live outside git:
 - Worker: `HERMES_BASE_URL`, `HERMES_API_SERVER_KEY`, provider webhook/reply secrets, Telegram allowlist.
 - Capability adapter: `CAPABILITY_ADAPTER_TOKEN` and `CAPABILITY_ARTIFACT_TARGETS_JSON`. The token must equal the Worker's `ARTIFACT_RENDERER_TOKEN`; the Worker and adapter target lists must match.
 - DB adapter: `DB_ADAPTER_TOKEN`, `DB_ADAPTER_DATASOURCES_JSON`, and the datasource-specific connection string env such as `LMS_READONLY_DATABASE_URL`. Each datasource entry must include its own `allowedSchemas` and `allowedTables`. The token must equal the Worker's `DATABASE_ADAPTER_TOKEN`; the datasource alias must equal both `DATABASE_DATASOURCE` and the non-secret `DATABASE_SCHEMA_CATALOG_JSON.datasource`; the Worker table/schema allowlists remain the first gate and the adapter independently enforces the same or narrower allowlists as the second gate.
+
+Before enabling the DB profile, prove the database role itself is read-only independently of application validation. Set `DB_READONLY_CONNECTION_ENV` to the datasource connection-string environment-variable name and `DB_READONLY_PROBE_TABLE` to one allowlisted `schema.table`, then run:
+
+```bash
+sudo docker compose --profile db run --rm \
+  -e DB_READONLY_CONNECTION_ENV=LMS_READONLY_DATABASE_URL \
+  -e DB_READONLY_PROBE_TABLE=public.example \
+  db-adapter /app/verify-readonly-role.sh
+```
+
+The verifier requires `default_transaction_read_only=on` and deliberately attempts a no-row `DELETE` inside a transaction. Enabling `/db` is prohibited unless the write probe is rejected. The verifier never prints the connection string.
 - Deploy executor: `DEPLOY_EXECUTOR_TOKEN`, `DEPLOY_EXECUTOR_PORT`, `DEPLOY_EXECUTOR_STATE_DIR`, and `DEPLOY_EXECUTOR_TARGETS_JSON`. The token must equal the Worker's secret; targets must name a fixed repository, app directory, backup directory, Compose file, and healthcheck.
 
 Never place provider tokens, GitHub tokens, OpenAI keys, or the Hermes API key in `config.template.yaml`, `compose.yaml`, tests, logs, snapshots, or committed env files.

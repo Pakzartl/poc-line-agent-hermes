@@ -20,6 +20,17 @@ export class DeployExecutionUncertainError extends Error {
 	}
 }
 
+export class DeployExecutionRejectedError extends Error {
+	readonly retryable = false;
+	readonly status: number;
+
+	constructor(message: string, status: number) {
+		super(message);
+		this.name = "DeployExecutionRejectedError";
+		this.status = status;
+	}
+}
+
 export async function executeApprovedDeploy(input: {
 	plan: DeployPlan;
 	targets: readonly DeployTarget[];
@@ -107,7 +118,10 @@ export async function executeApprovedDeploy(input: {
 		);
 	}
 	if (!response.ok) {
-		throw new Error(`Deploy executor rejected the plan (${response.status})`);
+		throw new DeployExecutionRejectedError(
+			`Deploy executor rejected the plan (${response.status})`,
+			response.status,
+		);
 	}
 	throw new DeployExecutionUncertainError(
 		"Deploy executor returned a success response without a verifiable artifact",

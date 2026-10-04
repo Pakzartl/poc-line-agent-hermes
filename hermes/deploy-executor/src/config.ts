@@ -52,7 +52,9 @@ export function parseDeployTargets(raw: string | undefined): DeployTarget[] {
 		throw new Error("DEPLOY_EXECUTOR_TARGETS_JSON must be valid JSON");
 	}
 	if (!Array.isArray(parsed) || parsed.length !== 1) {
-		throw new Error("DEPLOY_EXECUTOR_TARGETS_JSON must contain exactly one target");
+		throw new Error(
+			"DEPLOY_EXECUTOR_TARGETS_JSON must contain exactly one target",
+		);
 	}
 	const seen = new Set<string>();
 	return parsed.map((candidate, index) => {

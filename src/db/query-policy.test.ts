@@ -134,6 +134,25 @@ describe("read-only query policy", () => {
 			ok: false,
 			reason: "Parameter count does not match SQL placeholders",
 		});
+		expect(
+			planReadOnlyQuery({
+				sql: "select * from public.users where email = $1",
+				params: ["\ud800"],
+				policy,
+			}),
+		).toMatchObject({
+			ok: false,
+			reason: "Query parameter contains an unsupported value",
+		});
+	});
+
+	test("rejects invalid Unicode before SQL parsing", () => {
+		expect(
+			planReadOnlyQuery({
+				sql: "select '\ud800' from public.users",
+				policy,
+			}),
+		).toEqual({ ok: false, reason: "SQL contains invalid Unicode" });
 	});
 
 	test("masks PII and redacts audit identifiers", () => {

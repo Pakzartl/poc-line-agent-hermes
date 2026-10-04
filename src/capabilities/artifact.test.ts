@@ -126,4 +126,24 @@ Approve only after checkout smoke tests pass.
 			}),
 		).toBe("risk-assessment-risk-deploy-20261004143000.md");
 	});
+
+	test("redacts common credentials and email PII from downloadable markdown", () => {
+		const rendered = renderHilArtifactMarkdown({
+			...artifact,
+			objective:
+				"Investigate token=top-secret for owner@example.com without leaking it.",
+			evidence: [
+				{
+					label: "Runtime",
+					summary: "Authorization: Bearer abc.def.ghi password=hunter2",
+				},
+			],
+		});
+		expect(rendered).not.toContain("top-secret");
+		expect(rendered).not.toContain("owner@example.com");
+		expect(rendered).not.toContain("abc.def.ghi");
+		expect(rendered).not.toContain("hunter2");
+		expect(rendered).toContain("token=[redacted]");
+		expect(rendered).toContain("[redacted-email]");
+	});
 });
