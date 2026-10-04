@@ -72,7 +72,7 @@ export function createGitHubTools(
 				type: "function",
 				name: "search_code",
 				description:
-					"Search source code on the configured GitHub ref. Separate case-insensitive literal alternatives with | to scan the branch once.",
+					"Search source code on the repository and branch explicitly stated in the latest user message. Separate case-insensitive literal alternatives with | to scan the branch once.",
 				strict: true,
 				parameters: {
 					type: "object",
@@ -82,13 +82,13 @@ export function createGitHubTools(
 							description: "Repository in owner/name form.",
 						},
 						query: { type: "string", description: "Code search query." },
-						ref: {
-							type: ["string", "null"],
+						branch: {
+							type: "string",
 							description:
-								"Optional branch, tag, or commit. Defaults to the configured GitHub ref.",
+								"Branch or Git ref explicitly stated in the latest user message. Never infer it from history or defaults.",
 						},
 					},
-					required: ["repository", "query", "ref"],
+					required: ["repository", "query", "branch"],
 					additionalProperties: false,
 				},
 			},
@@ -96,7 +96,7 @@ export function createGitHubTools(
 				client.searchCode(
 					getRequiredArg(argumentsJson, "repository"),
 					getRequiredArg(argumentsJson, "query"),
-					getOptionalArg(argumentsJson, "ref"),
+					getRequiredArg(argumentsJson, "branch"),
 				),
 		},
 		{
@@ -116,13 +116,13 @@ export function createGitHubTools(
 							type: "string",
 							description: "Repository-relative file path.",
 						},
-						ref: {
-							type: ["string", "null"],
+						branch: {
+							type: "string",
 							description:
-								"Optional branch, tag, or commit. Defaults to the configured GitHub ref.",
+								"Branch or Git ref explicitly stated in the latest user message. Never infer it from history or defaults.",
 						},
 					},
-					required: ["repository", "path", "ref"],
+					required: ["repository", "path", "branch"],
 					additionalProperties: false,
 				},
 			},
@@ -130,7 +130,7 @@ export function createGitHubTools(
 				client.readFile(
 					getRequiredArg(argumentsJson, "repository"),
 					getRequiredArg(argumentsJson, "path"),
-					getOptionalArg(argumentsJson, "ref"),
+					getRequiredArg(argumentsJson, "branch"),
 				),
 		},
 		{
@@ -292,14 +292,14 @@ function createGitHubClient(config: AppConfig["github"], fetchImpl: FetchLike) {
 		async searchCode(
 			repository: string,
 			query: string,
-			requestedRef?: string,
+			branch: string,
 		): Promise<ToolResult> {
 			const repoPath = normalizeRepository(repository);
 			const queries = parseSearchQueries(query);
 			if (queries.length === 0) {
 				return { ok: false, error: "query is required" };
 			}
-			const ref = normalizeGitRef(requestedRef || config.ref);
+			const ref = normalizeGitRef(branch);
 			const { index, reused } = await getBranchCodeIndex(repoPath, ref);
 			const search = searchCodeIndex(index, queries);
 
@@ -324,11 +324,11 @@ function createGitHubClient(config: AppConfig["github"], fetchImpl: FetchLike) {
 		async readFile(
 			repository: string,
 			path: string,
-			requestedRef?: string,
+			branch: string,
 		): Promise<ToolResult> {
 			const repoPath = normalizeRepository(repository);
 			const safePath = normalizeRepoFilePath(path);
-			const ref = normalizeGitRef(requestedRef || config.ref);
+			const ref = normalizeGitRef(branch);
 			const data = await requestJson<{
 				content?: string;
 				encoding?: string;
@@ -753,13 +753,6 @@ function getRequiredArg(argumentsJson: string, name: string): string {
 		throw new Error(`${name} is required`);
 	}
 	return value;
-}
-
-function getOptionalArg(
-	argumentsJson: string,
-	name: string,
-): string | undefined {
-	return parseArgs(argumentsJson)[name] || undefined;
 }
 
 function validateConfig(config: AppConfig["github"]): void {

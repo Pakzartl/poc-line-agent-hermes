@@ -1,0 +1,273 @@
+export type QueryParameter =
+	| string
+	| number
+	| boolean
+	| null
+	| readonly (string | number | boolean | null)[];
+
+export type QueryLimits = {
+	maxRows: number;
+	maxBytes: number;
+	timeoutMs: number;
+};
+
+export type DbReadRequest = {
+	version: "DB_READ_REQUEST_V1";
+	datasource: string;
+	sql: string;
+	params?: readonly QueryParameter[];
+	limits: QueryLimits;
+	requestId: string;
+	requestedBy: string;
+	fingerprint: string;
+};
+
+export type ValidatedQuery = {
+	datasource: string;
+	sql: string;
+	params: readonly QueryParameter[];
+	limits: QueryLimits;
+	requestId: string;
+	requestedBy: string;
+	fingerprint: string;
+};
+
+export type ValidationConfig = {
+	datasources: readonly string[];
+	maxRows: number;
+	maxBytes: number;
+	timeoutMs: number;
+};
+
+export type ValidationResult =
+	| { ok: true; query: ValidatedQuery }
+	| { ok: false; status: number; reason: string };
+
+const datasourcePattern = /^[a-z0-9][a-z0-9._-]{0,63}$/;
+const mutationPattern =
+	/\b(insert|update|delete|merge|upsert|alter|create|drop|truncate|grant|revoke|vacuum|analyze|refresh|reindex|listen|notify|call|do|execute|prepare|deallocate|copy)\b/i;
+const transactionPattern =
+	/\b(begin|commit|rollback|savepoint|release\s+savepoint|set\s+transaction|lock)\b/i;
+const unsafeFunctionPattern =
+	/\b(pg_sleep|pg_read_file|pg_ls_dir|pg_stat_file|dblink|lo_import|lo_export|copy_to|copy_from)\s*\(/i;
+const selectIntoPattern = /\bselect\b[\s\S]*\binto\b/i;
+const placeholderPattern = /\$(\d+)\b/g;
+
+export function validateDbReadRequest(
+	body: unknown,
+	config: ValidationConfig,
+): ValidationResult {
+	if (!body || typeof body !== "object" || Array.isArray(body)) {
+		return reject(400, "request body must be an object");
+	}
+	const record = body as Record<string, unknown>;
+	if (record.version !== "DB_READ_REQUEST_V1") {
+		return reject(400, "unsupported request version");
+	}
+	const datasource = stringField(record, "datasource");
+	if (!datasourcePattern.test(datasource)) {
+		return reject(400, "datasource alias is invalid");
+	}
+	if (!config.datasources.includes(datasource)) {
+		return reject(404, "datasource is not configured");
+	}
+	const sql = normalizeSql(stringField(record, "sql"));
+	if (!sql) {
+		return reject(400, "SQL is required");
+	}
+	if (sql.length > 20_000) {
+		return reject(413, "SQL exceeds the maximum length");
+	}
+	const sqlSafety = validateSql(sql);
+	if (sqlSafety) {
+		return reject(400, sqlSafety);
+	}
+	const params = Array.isArray(record.params)
+		? (record.params as readonly unknown[])
+		: [];
+	const paramSafety = validateParameters(sql, params);
+	if (paramSafety) {
+		return reject(400, paramSafety);
+	}
+	const limits = parseLimits(record.limits, config);
+	if (!limits.ok) {
+		return limits;
+	}
+	const requestId = stringField(record, "requestId");
+	if (!/^[a-zA-Z0-9:._-]{1,160}$/.test(requestId)) {
+		return reject(400, "requestId is invalid");
+	}
+	const requestedBy = stringField(record, "requestedBy");
+	if (!/^[a-zA-Z0-9:._@-]{1,160}$/.test(requestedBy)) {
+		return reject(400, "requestedBy is invalid");
+	}
+	const fingerprint = stringField(record, "fingerprint");
+	if (fingerprint && fingerprint !== fingerprintSql(sql)) {
+		return reject(409, "SQL fingerprint does not match request");
+	}
+	if (!fingerprint) {
+		return reject(400, "SQL fingerprint is required");
+	}
+	return {
+		ok: true,
+		query: {
+			datasource,
+			sql,
+			params: params as readonly QueryParameter[],
+			limits: limits.limits,
+			requestId,
+			requestedBy,
+			fingerprint,
+		},
+	};
+}
+
+export function fingerprintSql(sql: string): string {
+	const canonical = normalizeSql(sql)
+		.toLowerCase()
+		.replace(/\$\d+\b/g, "?")
+		.replace(/\b\d+(\.\d+)?\b/g, "?")
+		.replace(/'([^']|'')*'/g, "?");
+	let hash = 0x811c9dc5;
+	for (const char of canonical) {
+		hash ^= char.charCodeAt(0);
+		hash = Math.imul(hash, 0x01000193);
+	}
+	return `q_${(hash >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+export function renderSqlLiteral(value: QueryParameter): string {
+	if (Array.isArray(value)) {
+		return `ARRAY[${value.map(renderScalarLiteral).join(",")}]`;
+	}
+	return renderScalarLiteral(value);
+}
+
+function renderScalarLiteral(value: string | number | boolean | null): string {
+	if (value === null) return "NULL";
+	if (typeof value === "boolean") return value ? "TRUE" : "FALSE";
+	if (typeof value === "number") {
+		if (!Number.isFinite(value)) {
+			throw new Error("invalid numeric parameter");
+		}
+		return String(value);
+	}
+	return `'${value.replace(/'/g, "''")}'`;
+}
+
+function validateSql(sql: string): string | undefined {
+	if (hasSqlComment(sql)) return "SQL comments are not allowed";
+	if (hasMultipleStatements(sql)) return "Only one SQL statement is allowed";
+	if (!/^(select|with)\b/i.test(sql))
+		return "Only SELECT or WITH queries are allowed";
+	if (mutationPattern.test(sql) || transactionPattern.test(sql)) {
+		return "SQL contains a blocked operation";
+	}
+	if (selectIntoPattern.test(sql)) return "SELECT INTO is not allowed";
+	if (unsafeFunctionPattern.test(sql)) return "SQL contains a blocked function";
+	return undefined;
+}
+
+function parseLimits(
+	value: unknown,
+	config: ValidationConfig,
+):
+	| { ok: true; limits: QueryLimits }
+	| { ok: false; status: number; reason: string } {
+	if (!value || typeof value !== "object" || Array.isArray(value)) {
+		return reject(400, "limits are required");
+	}
+	const record = value as Record<string, unknown>;
+	const maxRows = numberField(record, "maxRows");
+	const maxBytes = numberField(record, "maxBytes");
+	const timeoutMs = numberField(record, "timeoutMs");
+	if (
+		![maxRows, maxBytes, timeoutMs].every(
+			(item) => Number.isInteger(item) && item > 0,
+		)
+	) {
+		return reject(400, "limits must be positive integers");
+	}
+	if (
+		maxRows > config.maxRows ||
+		maxBytes > config.maxBytes ||
+		timeoutMs > config.timeoutMs
+	) {
+		return reject(400, "requested limits exceed adapter ceilings");
+	}
+	return { ok: true, limits: { maxRows, maxBytes, timeoutMs } };
+}
+
+function validateParameters(
+	sql: string,
+	params: readonly unknown[],
+): string | undefined {
+	if (params.length > 100) return "Too many query parameters";
+	const seen = new Set<number>();
+	for (const match of sql.matchAll(placeholderPattern)) {
+		seen.add(Number(match[1]));
+	}
+	if (seen.size > 0) {
+		const max = Math.max(...seen);
+		for (let index = 1; index <= max; index += 1) {
+			if (!seen.has(index)) return "Query parameters must be contiguous";
+		}
+		if (max !== params.length)
+			return "Parameter count does not match SQL placeholders";
+	} else if (params.length > 0) {
+		return "Parameters were provided but SQL has no placeholders";
+	}
+	for (const param of params) {
+		if (!isSafeParameter(param))
+			return "Query parameter contains an unsupported value";
+	}
+	return undefined;
+}
+
+function isSafeParameter(value: unknown): value is QueryParameter {
+	if (Array.isArray(value)) {
+		return value.length <= 100 && value.every(isSafeScalar);
+	}
+	return isSafeScalar(value);
+}
+
+function isSafeScalar(
+	value: unknown,
+): value is string | number | boolean | null {
+	if (value === null || typeof value === "boolean") return true;
+	if (typeof value === "number") return Number.isFinite(value);
+	return (
+		typeof value === "string" &&
+		value.length <= 4_000 &&
+		!/[\u0000-\u001f]/.test(value)
+	);
+}
+
+function normalizeSql(sql: string): string {
+	return sql.replace(/\s+/g, " ").trim().replace(/;+$/, "");
+}
+
+function hasSqlComment(sql: string): boolean {
+	return /--|\/\*|\*\//.test(sql);
+}
+
+function hasMultipleStatements(sql: string): boolean {
+	return sql.trim().replace(/;+$/, "").includes(";");
+}
+
+function stringField(record: Record<string, unknown>, field: string): string {
+	const value = record[field];
+	return typeof value === "string" ? value.trim() : "";
+}
+
+function numberField(record: Record<string, unknown>, field: string): number {
+	const value = record[field];
+	return typeof value === "number" ? value : Number.NaN;
+}
+
+function reject(
+	status: number,
+	reason: string,
+): { ok: false; status: number; reason: string } {
+	return { ok: false, status, reason };
+}

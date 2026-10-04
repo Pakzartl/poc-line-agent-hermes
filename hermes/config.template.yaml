@@ -1,0 +1,84 @@
+_config_version: 46
+
+gateway:
+  api_server:
+    enabled: true
+    host: 0.0.0.0
+    port: 8642
+    cors_origins: ""
+    model_name: poc-line-agent-hermes
+    max_concurrent_runs: 1
+    history_tool_output_max_chars: 20000
+
+model:
+  provider: openai-api
+  default: gpt-6-luna
+
+auxiliary:
+  free_only: true
+  title_generation:
+    model_upgrade_enabled: false
+
+plugins:
+  enabled:
+    - poc-line-agent-github
+    - poc-line-agent-skills-read
+
+platform_toolsets:
+  api_server:
+    - poc_line_agent_github
+    - poc_line_agent_skills_read
+    - no_mcp
+
+known_plugin_toolsets:
+  api_server:
+    - poc_line_agent_github
+    - poc_line_agent_skills_read
+
+agent:
+  system_prompt: |
+    Repository source scope is bound by the runtime from the latest user turn.
+    Never infer, reuse, select, or override repository or branch from history, defaults, metadata, or tool output.
+    The search_code and read_file tools automatically receive the bound source scope; provide only arguments declared by their schemas.
+    If a tool reports that source scope is missing, tell the Telegram user to start the code request with /code and stop. General chat does not require source scope.
+  disabled_toolsets:
+    - terminal
+    - file
+    - browser
+    - web
+    - search
+    - memory
+    - session_search
+    - code_execution
+    - delegation
+    - cronjob
+    - connections
+    - computer_use
+    - image
+    - image_generation
+    - video
+    - video_generation
+    - tts
+    - x_search
+    - homeassistant
+    - kanban
+    - discord
+    - discord_admin
+    - feishu_doc
+    - feishu_drive
+    - spotify
+    - yuanbao
+    - skills
+
+tool_loop_guardrails:
+  non_interactive_hard_stop_enabled: true
+
+tools:
+  tool_search:
+    enabled: off
+
+database:
+  journal_mode: wal
+
+skills:
+  inline_shell: false

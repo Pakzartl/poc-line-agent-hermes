@@ -1,0 +1,210 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "สถาปัตยกรรม Production ปัจจุบัน",
+    "output": "hermes/architecture.production.html",
+    "quality_profile": "showcase",
+    "viewBox": [1390, 760]
+  },
+  "components": [
+    {
+      "id": "telegram",
+      "type": "external",
+      "label": "Telegram",
+      "sublabel": "ผู้ใช้ใน allowlist",
+      "pos": [40, 100],
+      "size": [150, 66]
+    },
+    {
+      "id": "line_whatsapp",
+      "type": "external",
+      "label": "LINE + WhatsApp",
+      "sublabel": "ช่องทาง legacy",
+      "pos": [40, 350],
+      "size": [150, 66]
+    },
+    {
+      "id": "worker_edge",
+      "type": "security",
+      "label": "Cloudflare Worker",
+      "sublabel": "webhook auth + routing",
+      "tag": "AGENT_RUNTIME=hermes",
+      "pos": [250, 220],
+      "size": [180, 76]
+    },
+    {
+      "id": "telegram_queue",
+      "type": "messagebus",
+      "label": "Telegram Queue + DLQ",
+      "sublabel": "async jobs / retries",
+      "pos": [490, 80],
+      "size": [180, 70]
+    },
+    {
+      "id": "queue_consumer",
+      "type": "backend",
+      "label": "Worker Queue Consumer",
+      "sublabel": "dispatch + reply",
+      "pos": [730, 80],
+      "size": [180, 70]
+    },
+    {
+      "id": "edge_state",
+      "type": "database",
+      "label": "Edge State",
+      "sublabel": "Durable Object + KV",
+      "pos": [490, 500],
+      "size": [180, 70]
+    },
+    {
+      "id": "legacy_loop",
+      "type": "backend",
+      "label": "Legacy Agent Loop",
+      "sublabel": "LINE / WhatsApp",
+      "pos": [730, 370],
+      "size": [180, 70]
+    },
+    {
+      "id": "cf_tunnel",
+      "type": "cloud",
+      "label": "Cloudflare Tunnel",
+      "sublabel": "hermes.pakzartl.xyz",
+      "pos": [940, 80],
+      "size": [180, 70]
+    },
+    {
+      "id": "hermes_agent",
+      "type": "backend",
+      "label": "Hermes Agent",
+      "sublabel": "Docker + persistent state",
+      "tag": "OVH Debian 13",
+      "pos": [1180, 80],
+      "size": [190, 76]
+    },
+    {
+      "id": "external_apis",
+      "type": "external",
+      "label": "OpenAI + GitHub APIs",
+      "sublabel": "model + read-only code tools",
+      "pos": [1180, 430],
+      "size": [190, 70]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Cloudflare Free Platform",
+      "wraps": [
+        "worker_edge",
+        "telegram_queue",
+        "queue_consumer",
+        "edge_state",
+        "legacy_loop",
+        "cf_tunnel"
+      ],
+      "pad": 22
+    },
+    {
+      "kind": "security-group",
+      "label": "Personal OVH VPS / key-only SSH / UFW",
+      "wraps": ["hermes_agent"],
+      "pad": 20
+    }
+  ],
+  "connections": [
+    {
+      "from": "telegram",
+      "to": "worker_edge",
+      "label": "HTTPS webhook",
+      "variant": "security"
+    },
+    {
+      "from": "line_whatsapp",
+      "to": "worker_edge",
+      "label": "signed HTTPS webhook",
+      "variant": "security"
+    },
+    {
+      "from": "worker_edge",
+      "to": "telegram_queue",
+      "label": "enqueue allowed Telegram job",
+      "variant": "emphasis"
+    },
+    {
+      "from": "telegram_queue",
+      "to": "queue_consumer",
+      "label": "deliver / retry",
+      "variant": "emphasis",
+      "labelDy": 66
+    },
+    {
+      "from": "worker_edge",
+      "to": "edge_state",
+      "label": "dedupe claim",
+      "variant": "dashed"
+    },
+    {
+      "from": "queue_consumer",
+      "to": "cf_tunnel",
+      "label": "HTTPS + bearer key",
+      "variant": "security",
+      "labelDy": 59
+    },
+    {
+      "from": "cf_tunnel",
+      "to": "hermes_agent",
+      "label": "outbound-only connector",
+      "variant": "security",
+      "labelDy": 76
+    },
+    {
+      "from": "worker_edge",
+      "to": "legacy_loop",
+      "label": "LINE / WhatsApp",
+      "variant": "default"
+    },
+    {
+      "from": "legacy_loop",
+      "to": "external_apis",
+      "label": "model + read-only tools",
+      "variant": "default"
+    },
+    {
+      "from": "hermes_agent",
+      "to": "external_apis",
+      "label": "model + approved read tools",
+      "variant": "default",
+      "labelDy": 24
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "เส้นทาง Telegram",
+      "items": [
+        "Worker ตรวจ webhook และ allowlist ก่อนเข้า Queue",
+        "Queue Consumer เรียก Hermes ผ่าน Tunnel ด้วย bearer key",
+        "Hermes เก็บ session แบบถาวรบนดิสก์ OVH"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "เส้นทางที่ยังเป็น Legacy",
+      "items": [
+        "LINE และ WhatsApp ยังประมวลผลใน Worker",
+        "ยังใช้ OpenAI และ GitHub integrations เดิม",
+        "การย้ายสองช่องทางนี้ไป Hermes เป็นงานถัดไป"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "ขอบเขตความปลอดภัย",
+      "items": [
+        "Hermes bind เฉพาะ 127.0.0.1:8642",
+        "Tunnel เชื่อมออกจาก VPS และ API บังคับ bearer auth",
+        "SSH ใช้ key-only; UFW เปิด inbound เฉพาะพอร์ต 22"
+      ]
+    }
+  ]
+}

@@ -1,0 +1,31 @@
+services:
+  hermes:
+    environment:
+      API_SERVER_KEY: local-smoke-api-key-0000000000000000
+      OPENAI_API_KEY: local-fake-openai-key
+      OPENAI_BASE_URL: http://fake-openai:8080/v1
+      OPENAI_MODEL: fake-hermes-model
+      HERMES_PLUGIN_DEBUG: "1"
+    volumes:
+      - ./config.smoke.yaml:/opt/data/config.yaml:ro
+    depends_on:
+      fake-openai:
+        condition: service_healthy
+
+  fake-openai:
+    image: nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7
+    platform: linux/amd64
+    working_dir: /workspace
+    entrypoint: ["/usr/bin/python3"]
+    command: ["/workspace/hermes/smoke/fake_openai.py"]
+    environment:
+      FAKE_OPENAI_HOST: 0.0.0.0
+      FAKE_OPENAI_PORT: "8080"
+    volumes:
+      - ..:/workspace:ro
+    healthcheck:
+      test: ["CMD-SHELL", "python3 - <<'PY'\nimport urllib.request\nurllib.request.urlopen('http://127.0.0.1:8080/health', timeout=5).read()\nPY"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+      start_period: 5s
