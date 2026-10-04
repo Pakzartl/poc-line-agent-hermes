@@ -128,7 +128,7 @@ describe("Discord reply client", () => {
 		});
 	});
 
-	test("sends one attachment on the first interaction chunk using multipart", async () => {
+	test("sends one attachment on the final interaction chunk using multipart", async () => {
 		const requests: { init?: RequestInit }[] = [];
 		const client = createDiscordReplyClient({
 			apiBaseUrl: "https://discord.example/api/v10",
@@ -147,23 +147,24 @@ describe("Discord reply client", () => {
 		});
 
 		expect(requests).toHaveLength(2);
-		expect(requests[0]?.init?.headers).toBeUndefined();
-		expect(requests[0]?.init?.body).toBeInstanceOf(FormData);
-		const firstForm = requests[0]?.init?.body as FormData;
-		expect(JSON.parse(String(firstForm.get("payload_json")))).toEqual({
-			content: "a".repeat(2_000),
-			allowed_mentions: { parse: [] },
+		expect(requests[0]?.init?.headers).toEqual({
+			"Content-Type": "application/json",
 		});
-		const file = firstForm.get("files[0]") as File;
+		expect(requests[1]?.init?.headers).toBeUndefined();
+		expect(requests[1]?.init?.body).toBeInstanceOf(FormData);
+		const finalForm = requests[1]?.init?.body as FormData;
+		expect(JSON.parse(String(finalForm.get("payload_json")))).toEqual({
+			content: "a".repeat(100),
+			allowed_mentions: { parse: [] },
+			flags: 1 << 6,
+		});
+		const file = finalForm.get("files[0]") as File;
 		expect(file.name).toBe("risk-assessment.md");
 		expect(file.type).toBe("text/markdown;charset=utf-8");
 		expect(await file.text()).toBe("# Risk\n");
-		expect(requests[1]?.init?.headers).toEqual({
-			"Content-Type": "application/json",
-		});
 	});
 
-	test("sends one attachment on the first channel reply only", async () => {
+	test("sends one attachment on the final channel reply only", async () => {
 		const requests: { init?: RequestInit }[] = [];
 		const client = createDiscordReplyClient({
 			apiBaseUrl: "https://discord.example/api/v10",
@@ -185,21 +186,23 @@ describe("Discord reply client", () => {
 		expect(requests).toHaveLength(2);
 		expect(requests[0]?.init?.headers).toEqual({
 			Authorization: "Bot bot-token",
+			"Content-Type": "application/json",
 		});
-		expect(requests[0]?.init?.body).toBeInstanceOf(FormData);
-		const firstForm = requests[0]?.init?.body as FormData;
-		const payload = JSON.parse(String(firstForm.get("payload_json")));
-		expect(payload.message_reference).toEqual({
+		const firstPayload = JSON.parse(String(requests[0]?.init?.body));
+		expect(firstPayload.message_reference).toEqual({
 			message_id: "message",
 			fail_if_not_exists: false,
 		});
-		expect(await (firstForm.get("files[0]") as File).text()).toBe(
-			'{"ok":true}\n',
-		);
 		expect(requests[1]?.init?.headers).toEqual({
 			Authorization: "Bot bot-token",
-			"Content-Type": "application/json",
 		});
+		expect(requests[1]?.init?.body).toBeInstanceOf(FormData);
+		const finalForm = requests[1]?.init?.body as FormData;
+		const payload = JSON.parse(String(finalForm.get("payload_json")));
+		expect(payload.message_reference).toBeUndefined();
+		expect(await (finalForm.get("files[0]") as File).text()).toBe(
+			'{"ok":true}\n',
+		);
 	});
 
 	test("includes approval components on the original interaction reply", async () => {

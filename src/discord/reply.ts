@@ -78,22 +78,26 @@ export function createDiscordReplyClient(config: {
 	return {
 		async reply(applicationId, interactionToken, text, replyOptions) {
 			const chunks = splitDiscordMessage(text);
+			const lastChunkIndex = chunks.length - 1;
 			await sendInteraction(
 				`${apiBaseUrl}/webhooks/${encodeURIComponent(applicationId)}/${encodeURIComponent(interactionToken)}/messages/@original`,
 				"PATCH",
 				chunks[0] ?? "Done",
-				replyOptions,
+				lastChunkIndex === 0 ? replyOptions : undefined,
 			);
-			for (const chunk of chunks.slice(1)) {
+			for (const [offset, chunk] of chunks.slice(1).entries()) {
+				const chunkIndex = offset + 1;
 				await sendInteraction(
 					`${apiBaseUrl}/webhooks/${encodeURIComponent(applicationId)}/${encodeURIComponent(interactionToken)}`,
 					"POST",
 					chunk,
+					chunkIndex === lastChunkIndex ? replyOptions : undefined,
 				);
 			}
 		},
 		async replyToChannel(channelId, text, replyToMessageId, replyOptions) {
 			const chunks = splitDiscordMessage(text);
+			const lastChunkIndex = chunks.length - 1;
 			let firstMessageId: string | undefined;
 			for (const [index, chunk] of chunks.entries()) {
 				const response = await sendBotRequest(
@@ -110,7 +114,7 @@ export function createDiscordReplyClient(config: {
 								}
 							: {}),
 					},
-					index === 0 ? replyOptions : undefined,
+					index === lastChunkIndex ? replyOptions : undefined,
 				);
 				if (index === 0) firstMessageId = await responseMessageId(response);
 			}
@@ -140,19 +144,22 @@ export function createDiscordReplyClient(config: {
 		},
 		async editChannelMessage(channelId, messageId, text, replyOptions) {
 			const chunks = splitDiscordMessage(text);
+			const lastChunkIndex = chunks.length - 1;
 			await sendBotRequest(
 				`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/messages/${encodeURIComponent(messageId)}`,
 				{
 					content: chunks[0] ?? "Done",
 					allowed_mentions: { parse: [] },
 				},
-				replyOptions,
+				lastChunkIndex === 0 ? replyOptions : undefined,
 				"PATCH",
 			);
-			for (const chunk of chunks.slice(1)) {
+			for (const [offset, chunk] of chunks.slice(1).entries()) {
+				const chunkIndex = offset + 1;
 				await sendBotRequest(
 					`${apiBaseUrl}/channels/${encodeURIComponent(channelId)}/messages`,
 					{ content: chunk, allowed_mentions: { parse: [] } },
+					chunkIndex === lastChunkIndex ? replyOptions : undefined,
 				);
 			}
 		},
