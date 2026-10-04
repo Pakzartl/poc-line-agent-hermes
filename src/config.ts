@@ -1,3 +1,5 @@
+import { parseDbSchemaCatalogJson } from "./db/nl-planner";
+
 export type AppConfig = {
 	port: number;
 	runtime: {
@@ -63,6 +65,7 @@ export type AppConfig = {
 		databaseDatasource: string;
 		databaseAllowedSchemas: readonly string[];
 		databaseAllowedTables: readonly string[];
+		databaseSchemaCatalogJson: string;
 		artifactRendererUrl: string;
 		artifactRendererToken: string;
 		artifactScreenshotTargetsJson: string;
@@ -157,6 +160,7 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
 			databaseDatasource: env.DATABASE_DATASOURCE ?? "",
 			databaseAllowedSchemas: parseList(env.DATABASE_ALLOWED_SCHEMAS),
 			databaseAllowedTables: parseList(env.DATABASE_ALLOWED_TABLES),
+			databaseSchemaCatalogJson: env.DATABASE_SCHEMA_CATALOG_JSON ?? "",
 			artifactRendererUrl: stripTrailingSlash(env.ARTIFACT_RENDERER_URL ?? ""),
 			artifactRendererToken: env.ARTIFACT_RENDERER_TOKEN ?? "",
 			artifactScreenshotTargetsJson: env.ARTIFACT_SCREENSHOT_TARGETS_JSON ?? "",
@@ -413,7 +417,18 @@ function validateOptionalCapabilityConfig(config: AppConfig): void {
 		["DATABASE_DATASOURCE", capabilities.databaseDatasource],
 		["DATABASE_ALLOWED_SCHEMAS", capabilities.databaseAllowedSchemas.join(",")],
 		["DATABASE_ALLOWED_TABLES", capabilities.databaseAllowedTables.join(",")],
+		["DATABASE_SCHEMA_CATALOG_JSON", capabilities.databaseSchemaCatalogJson],
 	]);
+	if (capabilities.databaseSchemaCatalogJson.trim()) {
+		const catalog = parseDbSchemaCatalogJson(
+			capabilities.databaseSchemaCatalogJson,
+		);
+		if (catalog.datasource !== capabilities.databaseDatasource) {
+			throw new Error(
+				"DATABASE_SCHEMA_CATALOG_JSON datasource must match DATABASE_DATASOURCE",
+			);
+		}
+	}
 	validateOptionalPair("artifact renderer", [
 		["ARTIFACT_RENDERER_URL", capabilities.artifactRendererUrl],
 		["ARTIFACT_RENDERER_TOKEN", capabilities.artifactRendererToken],

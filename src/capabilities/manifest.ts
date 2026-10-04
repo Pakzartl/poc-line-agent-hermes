@@ -110,13 +110,14 @@ export const capabilityManifests = [
 		id: "db-read",
 		name: "/db",
 		description:
-			"Execute an explicit bounded read-only query or clearly report missing DB tooling.",
+			"Plan a schema-grounded bounded read-only query and execute it only after approval.",
 		inputContract:
-			"explicit SELECT/WITH query; natural-language execution is disabled until a schema-grounded planner is configured",
+			"Thai/English question or explicit SELECT/WITH query; complete adapter, allowlist, and schema catalog configuration",
 		permissions: ["database:read"],
 		steps: [
-			"Refuse mutations",
-			"Require a configured read-only adapter and table/schema allowlist",
+			"Create an immutable schema-grounded read-only plan and refuse mutations",
+			"Require approval bound to the requesting user, guild, job, and plan digest",
+			"Reverify the plan before calling the read-only adapter",
 			"Return a bounded answer and HIL artifact",
 		],
 		outputArtifact: "Read-only database HIL artifact",
@@ -127,8 +128,8 @@ export const capabilityManifests = [
 			"Artifact includes the data source and limitations",
 		],
 		failureBehavior:
-			"Never execute SQL without read-only adapter configuration.",
-		demo: "/db question:SELECT status, count(*) FROM reporting.course_progress GROUP BY status",
+			"Never plan or execute SQL without complete read-only adapter, allowlist, schema catalog, and matching approval state.",
+		demo: "/db question:สรุปสถานะความคืบหน้าของผู้เรียน",
 	},
 	{
 		id: "artifact",

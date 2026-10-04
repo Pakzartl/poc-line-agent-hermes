@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createMemoryCapabilityJobStore } from "../capabilities/job-store";
 import { loadConfig } from "../config";
+import {
+	planNaturalLanguageDatabaseQuery,
+	type DatabasePlanningContext,
+} from "../db/nl-planner";
 import { createDeployPlan } from "../deploy/plan";
 import type { SessionMemoryStore } from "../memory/types";
 import { createPassThroughTelegramUpdateStore } from "../telegram/update-store";
@@ -575,22 +579,28 @@ describe("Discord queued jobs", () => {
 		);
 
 		expect(hermesCalls).toBe(0);
-		expect(replies[0]?.[2]).toContain("database execution is disabled");
+		expect(replies[0]?.[2]).toContain("database planning is unavailable");
 	});
 
-	test("returns a provenance-rich JSON artifact for an allowlisted DB read", async () => {
+	test("returns a database plan with approval buttons without executing it", async () => {
 		const replies: unknown[][] = [];
+		let queryCalls = 0;
+		const store = createMemoryCapabilityJobStore();
+		const databasePlan = await createDatabasePlan("db-plan", "user");
+
 		await processDiscordQueueMessage(
 			{
 				body: {
 					...discordJob(),
-					interactionId: "db-job",
+					interactionId: "db-plan",
 					repository: undefined,
 					branch: undefined,
-					question: "SELECT id, email FROM public.users",
+					question: databasePlan.question,
+					databasePlan,
+					canonicalInputHash: databasePlan.planDigest,
 					capability: {
 						kind: "database_query",
-						question: "SELECT id, email FROM public.users",
+						question: databasePlan.question,
 					},
 				},
 				attempts: 1,
@@ -601,28 +611,12 @@ describe("Discord queued jobs", () => {
 				config: loadConfig({}),
 				orchestrator: { answer: async () => "must not run" },
 				databaseReadClient: {
-					query: async () => ({
-						datasource: "lms-readonly",
-						sql: "SELECT id, email FROM public.users",
-						columns: ["id", "email"],
-						rows: [{ id: 1, email: "[masked]" }],
-						rowCount: 1,
-						truncated: false,
-						durationMs: 17,
-						audit: {
-							datasource: "lms-readonly",
-							fingerprint: "q_12345678",
-							statementKind: "select",
-							referencedTables: ["public.users"],
-							parameterCount: 0,
-							limits: {
-								maxRows: 100,
-								maxBytes: 250_000,
-								timeoutMs: 5_000,
-							},
-						},
-					}),
+					query: async () => {
+						queryCalls += 1;
+						throw new Error("query must wait for approval");
+					},
 				},
+				databasePlanningContext,
 				discordReplyClient: {
 					reply: async (...args) => {
 						replies.push(args);
@@ -631,23 +625,148 @@ describe("Discord queued jobs", () => {
 					sendTyping: async () => undefined,
 				},
 				discordUpdateStore: createPassThroughTelegramUpdateStore(),
+				capabilityJobStore: store,
+				memoryStore: memoryStore(),
+			},
+		);
+
+		expect(queryCalls).toBe(0);
+		expect(replies[0]?.[2]).toContain("database query proposal");
+		expect(replies[0]?.[2]).toContain(databasePlan.sql);
+		const options = replies[0]?.[3] as {
+			components?: Array<{ components: Array<{ custom_id: string }> }>;
+		};
+		expect(
+			options.components?.[0]?.components.map((item) => item.custom_id),
+		).toEqual([
+			"cap:approve:approval_db_db-plan",
+			"cap:reject:approval_db_db-plan",
+		]);
+		expect((await store.getJob("db-plan"))?.status).toBe("waiting_approval");
+	});
+
+	test("returns a provenance-rich JSON artifact for an approved DB read", async () => {
+		const replies: unknown[][] = [];
+		const calls: unknown[] = [];
+		const store = createMemoryCapabilityJobStore();
+		const databasePlan = await createDatabasePlan("db-job", "user");
+		await store.createJob({
+			jobId: "db-job",
+			capability: "database_query",
+			userId: "user",
+			guildId: "guild",
+			actionDigest: databasePlan.planDigest,
+			objective: databasePlan.question,
+			metadata: { databasePlan: JSON.stringify(databasePlan) },
+		});
+		await store.transitionJob({
+			jobId: "db-job",
+			from: "queued",
+			to: "running",
+		});
+		await store.requestApproval({
+			approvalId: "approval_db_db-job",
+			jobId: "db-job",
+			userId: "user",
+			guildId: "guild",
+			action: "run database query",
+			actionDigest: databasePlan.planDigest,
+		});
+		await store.decideApproval({
+			approvalId: "approval_db_db-job",
+			decision: "approved",
+			userId: "user",
+			guildId: "guild",
+			actionDigest: databasePlan.planDigest,
+		});
+		await processDiscordQueueMessage(
+			{
+				body: {
+					...discordJob(),
+					interactionId: "db-approval-interaction",
+					action: "db_execute",
+					capabilityJobId: "db-job",
+					repository: undefined,
+					branch: undefined,
+					question: databasePlan.question,
+					databasePlan,
+					databaseApprovalId: "approval_db_db-job",
+					approvedBy: "user",
+					canonicalInputHash: databasePlan.planDigest,
+					capability: {
+						kind: "database_query",
+						question: databasePlan.question,
+					},
+				},
+				attempts: 1,
+				ack: () => undefined,
+				retry: () => undefined,
+			},
+			{
+				config: loadConfig({}),
+				orchestrator: { answer: async () => "must not run" },
+				databaseReadClient: {
+					query: async (input) => {
+						calls.push(input);
+						return {
+							datasource: "lms-readonly",
+							sql: databasePlan.sql,
+							columns: ["id", "email"],
+							rows: [{ id: 1, email: "[masked]" }],
+							rowCount: 1,
+							truncated: false,
+							durationMs: 17,
+							audit: {
+								datasource: "lms-readonly",
+								fingerprint: "q_12345678",
+								statementKind: "select",
+								referencedTables: ["public.users"],
+								parameterCount: 0,
+								limits: {
+									maxRows: 100,
+									maxBytes: 250_000,
+									timeoutMs: 5_000,
+								},
+							},
+						};
+					},
+				},
+				databasePlanningContext,
+				discordReplyClient: {
+					reply: async (...args) => {
+						replies.push(args);
+					},
+					replyToChannel: async () => undefined,
+					sendTyping: async () => undefined,
+				},
+				discordUpdateStore: createPassThroughTelegramUpdateStore(),
+				capabilityJobStore: store,
 				memoryStore: memoryStore(),
 			},
 		);
 
 		expect(replies[0]?.[2]).toContain("Datasource: `lms-readonly`");
 		expect(replies[0]?.[2]).toContain("Duration: 17 ms");
+		expect(calls).toEqual([
+			{
+				sql: databasePlan.sql,
+				params: databasePlan.params,
+				requestId: "db-job",
+				requestedBy: "user",
+			},
+		]);
 		const options = replies[0]?.[3] as {
 			attachment?: { filename: string; contentType: string; data: string };
 		};
 		expect(options.attachment?.filename).toEndWith(".json");
 		expect(options.attachment?.contentType).toContain("application/json");
 		expect(options.attachment?.data).toContain(
-			'"artifactId": "artifact_db-job"',
+			'"artifactId": "artifact_db-approval-interaction"',
 		);
 		expect(options.attachment?.data).toContain(
-			'"sql": "SELECT id, email FROM public.users"',
+			`"sql": ${JSON.stringify(databasePlan.sql)}`,
 		);
+		expect((await store.getJob("db-job"))?.status).toBe("completed");
 	});
 });
 
@@ -657,6 +776,47 @@ function memoryStore(): SessionMemoryStore {
 		append: async (_sessionId, messages) => messages,
 		clear: async () => undefined,
 	};
+}
+
+const databasePlanningContext: DatabasePlanningContext = {
+	catalog: {
+		datasource: "lms-readonly",
+		tables: [
+			{
+				schema: "public",
+				name: "users",
+				description: "learner users",
+				columns: [
+					{ name: "id" },
+					{ name: "email", sensitive: true },
+					{ name: "status" },
+				],
+			},
+		],
+	},
+	policy: {
+		enabled: true,
+		datasource: "lms-readonly",
+		allowedSchemas: ["public"],
+		allowedTables: ["public.users"],
+		maxRows: 50,
+		maxBytes: 50_000,
+		timeoutMs: 2_000,
+		maskColumns: ["email"],
+	},
+};
+
+async function createDatabasePlan(requestId: string, requestedBy: string) {
+	const result = await planNaturalLanguageDatabaseQuery({
+		question: "show learner users id and email",
+		catalog: databasePlanningContext.catalog,
+		policy: databasePlanningContext.policy,
+		requestId,
+		requestedBy,
+		now: "2026-10-05T00:00:00.000Z",
+	});
+	if (!result.ok) throw new Error(result.reason);
+	return result.plan;
 }
 
 function discordJob(): DiscordJob {

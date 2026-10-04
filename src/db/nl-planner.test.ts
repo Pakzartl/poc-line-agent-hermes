@@ -1,7 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
+	parseDbSchemaCatalogJson,
 	planNaturalLanguageDatabaseQuery,
 	type DbSchemaCatalog,
+	verifyNaturalLanguageDatabaseQueryPlan,
 } from "./nl-planner";
 import type { QueryPolicyConfig } from "./query-policy";
 
@@ -11,7 +13,7 @@ const catalog: DbSchemaCatalog = {
 		{
 			schema: "public",
 			name: "users",
-			description: "learner user accounts",
+			description: "learner user accounts บัญชีผู้เรียน",
 			columns: [
 				{ name: "id", type: "uuid" },
 				{ name: "email", type: "text", sensitive: true },
@@ -44,6 +46,35 @@ const policy: QueryPolicyConfig = {
 };
 
 describe("natural-language database query planner", () => {
+	test("parses and validates a configured schema catalog", () => {
+		expect(parseDbSchemaCatalogJson(JSON.stringify(catalog))).toEqual(catalog);
+		expect(() => parseDbSchemaCatalogJson("not-json")).toThrow(
+			"must be valid JSON",
+		);
+		expect(() =>
+			parseDbSchemaCatalogJson(
+				JSON.stringify({
+					datasource: "lms-readonly",
+					tables: [{ schema: "public", name: "bad-name", columns: [] }],
+				}),
+			),
+		).toThrow("Invalid DATABASE_SCHEMA_CATALOG_JSON");
+	});
+
+	test("maps Thai catalog terms without sending the question to an LLM", async () => {
+		const result = await planNaturalLanguageDatabaseQuery({
+			question: "บัญชีผู้เรียน",
+			catalog,
+			policy,
+			requestId: "req-thai",
+			requestedBy: "discord-user-1",
+		});
+
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+		expect(result.plan.referencedTables).toEqual(["public.users"]);
+	});
+
 	test("creates an approval-ready read-only plan from a question and catalog", async () => {
 		const result = await planNaturalLanguageDatabaseQuery({
 			question: "show learner users status and created date",
@@ -92,6 +123,26 @@ describe("natural-language database query planner", () => {
 		expect(second.ok).toBe(true);
 		if (!first.ok || !second.ok) return;
 		expect(first.plan.planDigest).toBe(second.plan.planDigest);
+	});
+
+	test("rejects a stored plan whose SQL changed after approval", async () => {
+		const result = await planNaturalLanguageDatabaseQuery({
+			question: "show learner users status",
+			catalog,
+			policy,
+			requestId: "req-tampered",
+			requestedBy: "discord-user-1",
+			now: "2026-10-04T00:00:00.000Z",
+		});
+		expect(result.ok).toBe(true);
+		if (!result.ok) return;
+
+		expect(
+			await verifyNaturalLanguageDatabaseQueryPlan(
+				{ ...result.plan, sql: "SELECT id FROM public.users" },
+				{ catalog, policy },
+			),
+		).toBe(false);
 	});
 
 	test("changes digest when SQL proposal changes", async () => {

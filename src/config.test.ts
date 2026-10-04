@@ -256,4 +256,50 @@ describe("config validation", () => {
 			),
 		).toThrow("HERMES_BASE_URL must be a valid URL");
 	});
+
+	test("requires a valid matching schema catalog for the database adapter", () => {
+		const databaseEnv = {
+			...validEnv,
+			DATABASE_ADAPTER_URL: "https://db-reader.example/query",
+			DATABASE_ADAPTER_TOKEN: "token",
+			DATABASE_DATASOURCE: "lms-readonly",
+			DATABASE_ALLOWED_SCHEMAS: "public",
+			DATABASE_ALLOWED_TABLES: "public.users",
+			DATABASE_SCHEMA_CATALOG_JSON: JSON.stringify({
+				datasource: "lms-readonly",
+				tables: [
+					{
+						schema: "public",
+						name: "users",
+						columns: [{ name: "id" }],
+					},
+				],
+			}),
+		};
+		expect(() => validateConfig(loadConfig(databaseEnv))).not.toThrow();
+		expect(() =>
+			validateConfig(
+				loadConfig({ ...databaseEnv, DATABASE_SCHEMA_CATALOG_JSON: "" }),
+			),
+		).toThrow(
+			"Incomplete database adapter configuration: DATABASE_SCHEMA_CATALOG_JSON",
+		);
+		expect(() =>
+			validateConfig(
+				loadConfig({
+					...databaseEnv,
+					DATABASE_SCHEMA_CATALOG_JSON: JSON.stringify({
+						datasource: "wrong-datasource",
+						tables: [
+							{
+								schema: "public",
+								name: "users",
+								columns: [{ name: "id" }],
+							},
+						],
+					}),
+				}),
+			),
+		).toThrow("datasource must match DATABASE_DATASOURCE");
+	});
 });

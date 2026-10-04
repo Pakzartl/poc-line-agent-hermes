@@ -3,6 +3,12 @@ import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
 import type { AppConfig } from "../config";
 import {
+	planNaturalLanguageDatabaseQuery,
+	type DatabasePlanningContext,
+	type NaturalLanguageDbQueryPlan,
+	verifyNaturalLanguageDatabaseQueryPlan,
+} from "../db/nl-planner";
+import {
 	createDeployPlan,
 	type DeployPlan,
 	parseDeployTargets,
@@ -27,6 +33,7 @@ export type DiscordWebhookDeps = {
 	discordUpdateStore: TelegramUpdateStore;
 	discordCodeSourceClient?: CodeSourceClient;
 	capabilityJobStore?: CapabilityJobStore;
+	databasePlanningContext?: DatabasePlanningContext;
 };
 
 const maxDiscordBodyBytes = 1_000_000;
@@ -119,8 +126,17 @@ export async function handleDiscordInteraction(
 		}
 		job = prepared.job;
 	}
+	if (job.capability?.kind === "database_query") {
+		const prepared = await prepareDatabaseJob(job, deps);
+		if (!prepared.ok) {
+			return ephemeralResponse(prepared.error);
+		}
+		job = prepared.job;
+	}
 	const canonicalInputHash =
-		job.deployPlan?.digest ?? (await hashCanonicalInput(job.text));
+		job.deployPlan?.digest ??
+		job.databasePlan?.planDigest ??
+		(await hashCanonicalInput(job.text));
 	if (job.capability && deps.capabilityJobStore) {
 		await deps.capabilityJobStore.createJob({
 			jobId: job.interactionId,
@@ -136,6 +152,9 @@ export async function handleDiscordInteraction(
 				...(job.branch ? { branch: job.branch } : {}),
 				...(job.deployPlan
 					? { deployPlan: JSON.stringify(job.deployPlan) }
+					: {}),
+				...(job.databasePlan
+					? { databasePlan: JSON.stringify(job.databasePlan) }
 					: {}),
 			},
 		});
@@ -419,6 +438,100 @@ async function prepareDeployJob(
 	}
 }
 
+async function prepareDatabaseJob(
+	job: DiscordJob,
+	deps: DiscordWebhookDeps,
+): Promise<
+	| {
+			ok: true;
+			job: DiscordJob & { databasePlan: NaturalLanguageDbQueryPlan };
+	  }
+	| { ok: false; error: string }
+> {
+	if (job.capability?.kind !== "database_query") {
+		return { ok: false, error: "Database query payload is invalid." };
+	}
+	if (!deps.capabilityJobStore || !deps.databasePlanningContext) {
+		return {
+			ok: false,
+			error:
+				"Read-only database queries are disabled until the adapter, allowlists, and schema catalog are configured. No query was run.",
+		};
+	}
+	const existing = await deps.capabilityJobStore.getJob(job.interactionId);
+	const existingPlan = await parseAndVerifyStoredDatabasePlan(
+		existing?.metadata.databasePlan,
+		deps.databasePlanningContext,
+	);
+	if (existingPlan) {
+		if (
+			existingPlan.question !== job.capability.question ||
+			existingPlan.requestedBy !== job.userId
+		) {
+			return {
+				ok: false,
+				error: "Database request replay does not match its stored plan.",
+			};
+		}
+		return { ok: true, job: { ...job, databasePlan: existingPlan } };
+	}
+	const question = job.capability.question.trim();
+	const result = await planNaturalLanguageDatabaseQuery({
+		question,
+		catalog: deps.databasePlanningContext.catalog,
+		policy: deps.databasePlanningContext.policy,
+		requestId: job.interactionId,
+		requestedBy: job.userId,
+		now: discordSnowflakeDate(job.interactionId)?.toISOString(),
+		...(looksLikeSqlStatement(question) ? { sqlProposal: question } : {}),
+	});
+	if (!result.ok) {
+		return { ok: false, error: `Database request rejected: ${result.reason}` };
+	}
+	return { ok: true, job: { ...job, databasePlan: result.plan } };
+}
+
+async function parseAndVerifyStoredDatabasePlan(
+	value: string | undefined,
+	context: DatabasePlanningContext,
+): Promise<NaturalLanguageDbQueryPlan | undefined> {
+	if (!value) return undefined;
+	let plan: NaturalLanguageDbQueryPlan;
+	try {
+		const parsed = JSON.parse(value) as Partial<NaturalLanguageDbQueryPlan>;
+		if (
+			parsed.version !== "DB_NL_PLAN_V1" ||
+			parsed.status !== "proposed" ||
+			typeof parsed.requestId !== "string" ||
+			typeof parsed.requestedBy !== "string" ||
+			typeof parsed.createdAt !== "string" ||
+			typeof parsed.question !== "string" ||
+			typeof parsed.catalogDigest !== "string" ||
+			typeof parsed.planDigest !== "string" ||
+			typeof parsed.sql !== "string" ||
+			!Array.isArray(parsed.params) ||
+			!parsed.policyPlan ||
+			!parsed.approval ||
+			parsed.approval.operationDigest !== parsed.planDigest
+		) {
+			return undefined;
+		}
+		plan = parsed as NaturalLanguageDbQueryPlan;
+	} catch {
+		return undefined;
+	}
+	if (!(await verifyNaturalLanguageDatabaseQueryPlan(plan, context))) {
+		return undefined;
+	}
+	return plan;
+}
+
+function looksLikeSqlStatement(value: string): boolean {
+	return /^\s*(select|with|alter|analyze|attach|begin|call|comment|commit|copy|create|delete|drop|execute|explain|grant|insert|listen|lock|merge|notify|reindex|reset|revoke|rollback|set|truncate|update|vacuum)\b/i.test(
+		value,
+	);
+}
+
 function parseStoredDeployPlan(
 	value: string | undefined,
 ): DeployPlan | undefined {
@@ -498,14 +611,21 @@ async function handleComponent(
 	}
 	const record = await deps.capabilityJobStore.getJob(approval.jobId);
 	const deployPlan = parseStoredDeployPlan(record?.metadata.deployPlan);
+	const databasePlan = deps.databasePlanningContext
+		? await parseAndVerifyStoredDatabasePlan(
+				record?.metadata.databasePlan,
+				deps.databasePlanningContext,
+			)
+		: undefined;
+	const planDigest = deployPlan?.digest ?? databasePlan?.planDigest;
 	if (
 		!record ||
 		record.status !== "waiting_approval" ||
-		!deployPlan ||
-		deployPlan.digest !== approval.actionDigest
+		!planDigest ||
+		planDigest !== approval.actionDigest
 	) {
 		return ephemeralResponse(
-			"The immutable deploy plan is unavailable or stale.",
+			"The immutable capability plan is unavailable or stale.",
 		);
 	}
 	const decision = action === "approve" ? "approved" : "rejected";
@@ -520,49 +640,66 @@ async function handleComponent(
 		return ephemeralResponse("The approval could not be recorded.");
 	}
 	if (decision === "rejected") {
+		const label = deployPlan ? "Deploy" : "Database query";
 		return ephemeralResponse(
-			`Deploy request \`${record.jobId}\` was rejected. No deployment was run.`,
+			`${label} request \`${record.jobId}\` was rejected. Nothing was executed.`,
 		);
 	}
 
-	const capability = {
-		kind: "deploy_request" as const,
-		repository: deployPlan.repository,
-		commitSha: deployPlan.commitSha,
-		target: deployPlan.targetId,
-	};
-	const executionJob: DiscordJob = {
+	const executionKind = deployPlan ? "deploy" : "database";
+	const executionProviderSessionId = `discord:${executionKind}:${record.jobId}`;
+	const executionIdempotencyKey = `discord:${executionKind}-approval:${approvalId}`;
+	const commonJob = {
 		interactionId: interaction.id,
 		interactionToken: interaction.token,
 		applicationId: interaction.application_id,
 		userId,
 		...(interaction.channel_id ? { channelId: interaction.channel_id } : {}),
 		...(interaction.guild_id ? { guildId: interaction.guild_id } : {}),
-		action: "deploy_execute",
-		capability,
-		text: `execute approved deploy ${deployPlan.id}`,
-		repository: deployPlan.repository,
-		branch: deployPlan.commitSha,
-		question: deployPlan.targetId,
 		capabilityJobId: record.jobId,
-		deployPlan,
-		deployApprovalId: approvalId,
 		approvedBy: userId,
-		providerSessionId: `discord:deploy:${record.jobId}`,
-		idempotencyKey: `discord:deploy-approval:${approvalId}`,
-		canonicalInputHash: deployPlan.digest,
+		providerSessionId: executionProviderSessionId,
+		idempotencyKey: executionIdempotencyKey,
+		canonicalInputHash: planDigest,
 	};
-	const executionProviderSessionId = `discord:deploy:${record.jobId}`;
-	const executionIdempotencyKey = `discord:deploy-approval:${approvalId}`;
+	const executionJob: DiscordJob = deployPlan
+		? {
+				...commonJob,
+				action: "deploy_execute",
+				capability: {
+					kind: "deploy_request",
+					repository: deployPlan.repository,
+					commitSha: deployPlan.commitSha,
+					target: deployPlan.targetId,
+				},
+				text: `execute approved deploy ${deployPlan.id}`,
+				repository: deployPlan.repository,
+				branch: deployPlan.commitSha,
+				question: deployPlan.targetId,
+				deployPlan,
+				deployApprovalId: approvalId,
+			}
+		: {
+				...commonJob,
+				action: "db_execute",
+				capability: {
+					kind: "database_query",
+					question: databasePlan?.question ?? record.objective,
+				},
+				text: `execute approved database query ${record.jobId}`,
+				question: databasePlan?.question ?? record.objective,
+				databasePlan: databasePlan as NaturalLanguageDbQueryPlan,
+				databaseApprovalId: approvalId,
+			};
 	const claim = await deps.discordUpdateStore.claim({
 		providerSessionId: executionProviderSessionId,
 		idempotencyKey: executionIdempotencyKey,
-		canonicalInputHash: deployPlan.digest,
+		canonicalInputHash: planDigest,
 		updateId: interaction.id,
 	});
 	if (!claim.claimed) {
 		return ephemeralResponse(
-			"This approved deploy is already being processed.",
+			`This approved ${executionKind} request is already being processed.`,
 		);
 	}
 	try {
@@ -580,18 +717,18 @@ async function handleComponent(
 			jobId: record.jobId,
 			from: "running",
 			to: "failed",
-			detail: "Approved deploy could not be queued",
+			detail: `Approved ${executionKind} request could not be queued`,
 			actorUserId: userId,
 		});
 		console.error(
 			JSON.stringify({
-				message: "approved deploy enqueue failed",
+				message: `approved ${executionKind} enqueue failed`,
 				jobId: record.jobId,
 				error: error instanceof Error ? error.message : "Unknown error",
 			}),
 		);
 		return ephemeralResponse(
-			"Approval was recorded, but deploy queueing failed.",
+			`Approval was recorded, but ${executionKind} queueing failed.`,
 		);
 	}
 	return deferredResponse();

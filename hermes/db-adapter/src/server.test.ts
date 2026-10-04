@@ -117,6 +117,33 @@ describe("db adapter", () => {
 		}
 	});
 
+	test("rejects comma joins and quoted identifiers before execution", async () => {
+		let executeCalls = 0;
+		const handler = createDbAdapterHandler({
+			config,
+			execute: async () => {
+				executeCalls += 1;
+				return { rows: [] };
+			},
+		});
+		for (const sql of [
+			"SELECT secrets.password FROM public.users users, private.secrets secrets",
+			'SELECT * FROM public.users JOIN "private"."secrets" ON true',
+		]) {
+			const response = await handler(
+				new Request("http://db.test/db/query", {
+					method: "POST",
+					headers: auth,
+					body: JSON.stringify(
+						validBody({ sql, params: [], fingerprint: fingerprintSql(sql) }),
+					),
+				}),
+			);
+			expect(response.status).toBe(400);
+		}
+		expect(executeCalls).toBe(0);
+	});
+
 	test("rejects writes, comments, multi statement input, and unsafe functions", async () => {
 		const handler = createDbAdapterHandler({
 			config,

@@ -89,6 +89,30 @@ describe("read-only query policy", () => {
 		});
 	});
 
+	test("rejects relation syntax the allowlist extractor cannot prove", () => {
+		expect(
+			planReadOnlyQuery({
+				sql: "select secrets.password from public.users users, private.secrets secrets",
+				policy,
+			}),
+		).toMatchObject({ ok: false, reason: "Comma joins are not supported" });
+		expect(
+			planReadOnlyQuery({
+				sql: 'select * from public.users join "private"."secrets" on true',
+				policy,
+			}),
+		).toMatchObject({
+			ok: false,
+			reason: "Quoted SQL identifiers are not supported",
+		});
+		expect(
+			planReadOnlyQuery({
+				sql: "select id, email from public.users where id in (1, 2)",
+				policy,
+			}).ok,
+		).toBe(true);
+	});
+
 	test("validates query parameters deterministically", () => {
 		expect(
 			planReadOnlyQuery({

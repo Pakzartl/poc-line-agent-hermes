@@ -7,11 +7,15 @@ import {
 	renderHilArtifactMarkdown,
 	safeArtifactFilename,
 } from "../capabilities/artifact";
-import { validateReadOnlySql } from "../capabilities/db";
 import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
 import type { AppConfig } from "../config";
 import type { DatabaseReadClient, DatabaseReadResult } from "../db/client";
+import type {
+	DatabasePlanningContext,
+	NaturalLanguageDbQueryPlan,
+} from "../db/nl-planner";
+import { verifyNaturalLanguageDatabaseQueryPlan } from "../db/nl-planner";
 import {
 	type DeployExecutionResult,
 	DeployExecutionUncertainError,
@@ -49,7 +53,13 @@ export type DiscordJob = {
 	delivery?: "interaction" | "channel";
 	sourceMessageId?: string;
 	progressMessageId?: string;
-	action: "chat" | "clear" | "status" | "skills" | "deploy_execute";
+	action:
+		| "chat"
+		| "clear"
+		| "status"
+		| "skills"
+		| "deploy_execute"
+		| "db_execute";
 	capability?: DiscordCapabilityPayload;
 	text: string;
 	repository?: string;
@@ -63,6 +73,8 @@ export type DiscordJob = {
 	capabilityJobId?: string;
 	deployPlan?: DeployPlan;
 	deployApprovalId?: string;
+	databasePlan?: NaturalLanguageDbQueryPlan;
+	databaseApprovalId?: string;
 	approvedBy?: string;
 };
 
@@ -78,6 +90,7 @@ export type DiscordJobProcessorDeps = {
 	discordUpdateStore: TelegramUpdateStore;
 	capabilityJobStore?: CapabilityJobStore;
 	databaseReadClient?: DatabaseReadClient;
+	databasePlanningContext?: DatabasePlanningContext;
 	memoryStore: SessionMemoryStore;
 	fetch?: FetchLike;
 };
@@ -248,11 +261,7 @@ async function processDiscordJob(
 		});
 		return "processed";
 	}
-	if (
-		job.capability &&
-		deps.capabilityJobStore &&
-		job.action !== "deploy_execute"
-	) {
+	if (job.capability && deps.capabilityJobStore && !isApprovedExecution(job)) {
 		await deps.capabilityJobStore.transitionJob({
 			jobId: capabilityJobId(job),
 			from: "queued",
@@ -287,11 +296,7 @@ async function processDiscordJob(
 		await terminalUpdate(job, deps.discordUpdateStore, "complete", {
 			replyContentHash: await hashCanonicalInput(responseText),
 		});
-		if (
-			job.capability &&
-			deps.capabilityJobStore &&
-			!isDeployApprovalRequest(job)
-		) {
+		if (job.capability && deps.capabilityJobStore && !isApprovalRequest(job)) {
 			await deps.capabilityJobStore.transitionJob({
 				jobId: capabilityJobId(job),
 				from: "running",
@@ -317,6 +322,9 @@ async function answerQuestion(
 	if (job.action === "deploy_execute") {
 		return executeDeploy(job, deps);
 	}
+	if (job.action === "db_execute") {
+		return executeDatabasePlan(job, deps);
+	}
 	if (job.action === "status") {
 		return {
 			text: [
@@ -334,29 +342,14 @@ async function answerQuestion(
 		return captureArtifact(job, deps, sessionId, route);
 	}
 	if (job.capability?.kind === "database_query") {
-		const databaseInput = job.question ?? job.text;
-		if (!deps.databaseReadClient) {
+		if (!job.databasePlan || !deps.databaseReadClient) {
 			return {
-				text: "Read-only database execution is disabled until DATABASE_ADAPTER_* and allowlist settings are configured. No query was run.",
+				text: "Read-only database planning is unavailable or incomplete. No query was run.",
+				capabilityStatus: "failed",
 			};
 		}
-		if (!looksLikeSql(databaseInput)) {
-			return {
-				text: "Natural-language database execution is not enabled. Provide an explicit read-only SELECT or WITH query; it will still be checked against the configured schema/table allowlist, timeout, row limit, byte limit, and PII mask.",
-			};
-		}
-		const validation = validateReadOnlySql(databaseInput);
-		if (!validation.ok) {
-			return { text: `DB request rejected: ${validation.reason}` };
-		}
-		const result = await deps.databaseReadClient.query({
-			sql: validation.sql,
-			requestId: job.interactionId,
-			requestedBy: job.userId,
-		});
 		return {
-			text: formatDatabaseResult(result),
-			attachment: buildDatabaseResultAttachment(job, result),
+			text: formatDatabasePlan(job.databasePlan),
 		};
 	}
 	if (route === "hermes") {
@@ -448,7 +441,7 @@ async function recoverHermesAnswer(
 			to: "running",
 			detail: "Recovered Hermes answer",
 		});
-		if (!isDeployApprovalRequest(job)) {
+		if (!isApprovalRequest(job)) {
 			await deps.capabilityJobStore.transitionJob({
 				jobId: capabilityJobId(job),
 				from: "running",
@@ -556,29 +549,49 @@ async function buildDiscordReplyOptions(
 		attachmentOverride && hilAttachment
 			? [attachmentOverride, hilAttachment]
 			: undefined;
-	if (!isDeployApprovalRequest(job)) {
+	if (!isApprovalRequest(job)) {
 		return attachment
 			? { attachment, ...(attachments ? { attachments } : {}) }
 			: undefined;
 	}
-	if (!job.deployPlan || !deps.capabilityJobStore) {
-		throw new Error("Deploy approval state is unavailable");
+	if (!deps.capabilityJobStore) {
+		throw new Error("Capability approval state is unavailable");
+	}
+	const approvalInput = job.deployPlan
+		? {
+				approvalId: `approval_${job.deployPlan.id}`,
+				action: `deploy ${job.deployPlan.repository}@${job.deployPlan.commitSha} to ${job.deployPlan.targetId}`,
+				actionDigest: job.deployPlan.digest,
+				ttlSeconds: Math.max(
+					60,
+					Math.floor(
+						(Date.parse(job.deployPlan.expiresAt) -
+							Date.parse(job.deployPlan.createdAt)) /
+							1_000,
+					),
+				),
+				approveLabel: "Approve deploy",
+			}
+		: job.databasePlan
+			? {
+					approvalId: `approval_db_${job.interactionId}`,
+					action: `run read-only database query ${job.databasePlan.policyPlan.fingerprint}`,
+					actionDigest: job.databasePlan.planDigest,
+					ttlSeconds: 15 * 60,
+					approveLabel: "Approve query",
+				}
+			: undefined;
+	if (!approvalInput) {
+		throw new Error("Immutable approval plan is unavailable");
 	}
 	const approval = await deps.capabilityJobStore.requestApproval({
-		approvalId: `approval_${job.deployPlan.id}`,
+		approvalId: approvalInput.approvalId,
 		jobId: capabilityJobId(job),
 		userId: job.userId,
 		guildId: job.guildId,
-		action: `deploy ${job.deployPlan.repository}@${job.deployPlan.commitSha} to ${job.deployPlan.targetId}`,
-		actionDigest: job.deployPlan.digest,
-		ttlSeconds: Math.max(
-			60,
-			Math.floor(
-				(Date.parse(job.deployPlan.expiresAt) -
-					Date.parse(job.deployPlan.createdAt)) /
-					1_000,
-			),
-		),
+		action: approvalInput.action,
+		actionDigest: approvalInput.actionDigest,
+		ttlSeconds: approvalInput.ttlSeconds,
 	});
 	return {
 		...(attachment ? { attachment } : {}),
@@ -590,7 +603,7 @@ async function buildDiscordReplyOptions(
 					{
 						type: 2,
 						style: 3,
-						label: "Approve deploy",
+						label: approvalInput.approveLabel,
 						custom_id: `cap:approve:${approval.approvalId}`,
 					},
 					{
@@ -835,6 +848,56 @@ async function executeDeploy(
 			)}\n`,
 		},
 		capabilityStatus: result.status === "failed" ? "failed" : "completed",
+	};
+}
+
+async function executeDatabasePlan(
+	job: DiscordJob,
+	deps: DiscordJobProcessorDeps,
+): Promise<DiscordJobAnswer> {
+	if (
+		!job.databasePlan ||
+		!job.databaseApprovalId ||
+		!job.approvedBy ||
+		!deps.capabilityJobStore ||
+		!deps.databaseReadClient ||
+		!deps.databasePlanningContext
+	) {
+		throw new Error("Approved database query context is incomplete");
+	}
+	const approval = await deps.capabilityJobStore.getApproval(
+		job.databaseApprovalId,
+	);
+	if (
+		!approval ||
+		approval.status !== "approved" ||
+		approval.jobId !== capabilityJobId(job) ||
+		approval.userId !== job.approvedBy ||
+		job.databasePlan.requestedBy !== job.approvedBy ||
+		approval.actionDigest !== job.databasePlan.planDigest ||
+		job.databasePlan.approval.operationDigest !== job.databasePlan.planDigest
+	) {
+		throw new Error(
+			"Database query approval is missing, expired, or does not match",
+		);
+	}
+	if (
+		!(await verifyNaturalLanguageDatabaseQueryPlan(
+			job.databasePlan,
+			deps.databasePlanningContext,
+		))
+	) {
+		throw new Error("Database query plan failed immutable digest verification");
+	}
+	const result = await deps.databaseReadClient.query({
+		sql: job.databasePlan.sql,
+		params: job.databasePlan.params,
+		requestId: capabilityJobId(job),
+		requestedBy: job.approvedBy,
+	});
+	return {
+		text: formatDatabaseResult(result),
+		attachment: buildDatabaseResultAttachment(job, result),
 	};
 }
 
@@ -1186,18 +1249,12 @@ function capabilityName(job: DiscordJob): string {
 	}
 }
 
-function looksLikeSql(value: string): boolean {
-	return /^\s*(select|with|alter|analyze|attach|begin|call|comment|commit|copy|create|delete|drop|execute|explain|grant|insert|listen|lock|merge|notify|reindex|reset|revoke|rollback|set|truncate|update|vacuum)\b/i.test(
-		value,
-	);
-}
-
 async function ensureCapabilityJob(
 	job: DiscordJob,
 	deps: DiscordJobProcessorDeps,
 ): Promise<void> {
 	if (!job.capability || !deps.capabilityJobStore) return;
-	if (job.action === "deploy_execute") return;
+	if (isApprovedExecution(job)) return;
 	await deps.capabilityJobStore.createJob({
 		jobId: capabilityJobId(job),
 		capability: job.capability.kind,
@@ -1206,6 +1263,7 @@ async function ensureCapabilityJob(
 		channelId: job.channelId,
 		actionDigest:
 			job.deployPlan?.digest ??
+			job.databasePlan?.planDigest ??
 			job.canonicalInputHash ??
 			(await hashCanonicalInput(job.text)),
 		objective: job.question ?? job.text,
@@ -1214,6 +1272,9 @@ async function ensureCapabilityJob(
 			...(job.repository ? { repository: job.repository } : {}),
 			...(job.branch ? { branch: job.branch } : {}),
 			...(job.deployPlan ? { deployPlan: JSON.stringify(job.deployPlan) } : {}),
+			...(job.databasePlan
+				? { databasePlan: JSON.stringify(job.databasePlan) }
+				: {}),
 		},
 	});
 }
@@ -1243,8 +1304,32 @@ function capabilityJobId(job: DiscordJob): string {
 	return job.capabilityJobId ?? job.interactionId;
 }
 
-function isDeployApprovalRequest(job: DiscordJob): boolean {
-	return job.action === "chat" && job.capability?.kind === "deploy_request";
+function isApprovalRequest(job: DiscordJob): boolean {
+	return (
+		job.action === "chat" &&
+		((job.capability?.kind === "deploy_request" && Boolean(job.deployPlan)) ||
+			(job.capability?.kind === "database_query" && Boolean(job.databasePlan)))
+	);
+}
+
+function isApprovedExecution(job: DiscordJob): boolean {
+	return job.action === "deploy_execute" || job.action === "db_execute";
+}
+
+function formatDatabasePlan(plan: NaturalLanguageDbQueryPlan): string {
+	return [
+		"**Read-only database query proposal**",
+		`Datasource: \`${plan.policyPlan.datasource}\``,
+		`Tables: ${plan.referencedTables.map((table) => `\`${table}\``).join(", ")}`,
+		`Limits: ${plan.policyPlan.maxRows} rows, ${plan.policyPlan.maxBytes} bytes, ${plan.policyPlan.timeoutMs} ms`,
+		`Query fingerprint: \`${plan.policyPlan.fingerprint}\``,
+		"```sql",
+		plan.sql,
+		"```",
+		...plan.assumptions.map((assumption) => `Assumption: ${assumption}`),
+		...plan.warnings.map((warning) => `Warning: ${warning}`),
+		"No query has run. Approve this exact immutable plan to execute it once.",
+	].join("\n");
 }
 
 function formatDatabaseResult(result: DatabaseReadResult): string {

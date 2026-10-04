@@ -155,14 +155,14 @@ Durable Object, so it adds no Cloudflare resource.
 
 - `/code` investigates an explicit repository and branch and attaches a cited HIL artifact.
 - `/risk` inspects an implementation or deployment change and returns blast radius, side effects, a Human Test Plan, and a HIL artifact.
-- `/db` executes an explicit `SELECT`/`WITH` query. Live execution is disabled unless the complete read-only adapter block is configured; natural-language-to-SQL, mutations, comments, multi-statements, unsafe functions, non-allowlisted tables, oversized results, and unmasked PII fail closed.
+- `/db` maps a Thai/English question or explicit `SELECT`/`WITH` query to an immutable read-only plan, shows the SQL and limits, and runs it only after the requesting user presses **Approve query**. Live planning and execution stay disabled unless the complete adapter, allowlist, and schema-catalog block is configured; mutations, comments, multi-statements, unsafe functions, non-allowlisted tables, oversized results, and unmasked PII fail closed.
 - `/artifact` creates a Markdown, JSON, CSV, diagram, or screenshot artifact. Text artifacts are generated through the existing model path and validated before attachment. Screenshots accept only a server-owned target id; users cannot supply an arbitrary URL. Production includes the no-cost OVH companion renderer and a `javis-health` demo target.
 - `/deploy` accepts an allowlisted repository, immutable 40-character commit SHA, and autocomplete target. It creates a plan first, then requires the requesting user to press **Approve deploy** before the external executor is called. Approval is bound to user, guild, target, repository, SHA, expiry, and plan digest.
 - `/status request_id:<id>` reads the persisted capability lifecycle and latest audit entry.
 - `/skills` lists the demo and output artifact for every capability.
 - `/clear` clears the caller's channel-scoped Hermes conversation.
 
-All capability jobs use the existing Durable Object for `queued → running → waiting_approval → completed/failed/cancelled` state and the existing Queue for execution. Deploy chat generation can only prepare a plan; it cannot call the executor.
+All capability jobs use the existing Durable Object for `queued → running → waiting_approval → completed/failed/cancelled` state and the existing Queue for execution. Database and deploy requests first create immutable plans; neither can call its executor before a matching approval.
 
 ### Optional capability adapters
 
@@ -175,6 +175,7 @@ DATABASE_ADAPTER_TOKEN=secret
 DATABASE_DATASOURCE=lms-read-replica
 DATABASE_ALLOWED_SCHEMAS=public,reporting
 DATABASE_ALLOWED_TABLES=public.users,reporting.course_progress
+DATABASE_SCHEMA_CATALOG_JSON={"datasource":"lms-read-replica","tables":[{"schema":"public","name":"users","description":"บัญชีผู้เรียน learner users","columns":[{"name":"id","type":"uuid"},{"name":"email","type":"text","sensitive":true},{"name":"status","type":"text"}]}]}
 
 # Screenshot renderer; targets are IDs mapped to URLs on the server
 ARTIFACT_RENDERER_URL=https://renderer.example/capture

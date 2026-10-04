@@ -57,6 +57,34 @@ export type NaturalLanguageDbQueryPlanResult =
 	| { ok: true; plan: NaturalLanguageDbQueryPlan }
 	| { ok: false; reason: string; warnings?: readonly string[] };
 
+export type DatabasePlanningContext = {
+	catalog: DbSchemaCatalog;
+	policy: QueryPolicyConfig;
+};
+
+export function parseDbSchemaCatalogJson(value: string): DbSchemaCatalog {
+	let parsed: unknown;
+	try {
+		parsed = JSON.parse(value);
+	} catch {
+		throw new Error("DATABASE_SCHEMA_CATALOG_JSON must be valid JSON");
+	}
+	if (!isRecord(parsed) || !Array.isArray(parsed.tables)) {
+		throw new Error(
+			"DATABASE_SCHEMA_CATALOG_JSON must contain datasource and tables",
+		);
+	}
+	const catalog: DbSchemaCatalog = {
+		datasource: typeof parsed.datasource === "string" ? parsed.datasource : "",
+		tables: parsed.tables.map(parseCatalogTable),
+	};
+	const error = validateCatalog(catalog);
+	if (error) {
+		throw new Error(`Invalid DATABASE_SCHEMA_CATALOG_JSON: ${error}`);
+	}
+	return catalog;
+}
+
 export async function planNaturalLanguageDatabaseQuery(input: {
 	question: string;
 	catalog: DbSchemaCatalog;
@@ -168,6 +196,28 @@ export async function planNaturalLanguageDatabaseQuery(input: {
 			},
 		},
 	};
+}
+
+export async function verifyNaturalLanguageDatabaseQueryPlan(
+	plan: NaturalLanguageDbQueryPlan,
+	context: DatabasePlanningContext,
+): Promise<boolean> {
+	const verified = await planNaturalLanguageDatabaseQuery({
+		question: plan.question,
+		catalog: context.catalog,
+		policy: context.policy,
+		requestId: plan.requestId,
+		requestedBy: plan.requestedBy,
+		now: plan.createdAt,
+		sqlProposal: plan.sql,
+		params: plan.params,
+	});
+	return (
+		verified.ok &&
+		verified.plan.planDigest === plan.planDigest &&
+		verified.plan.catalogDigest === plan.catalogDigest &&
+		plan.approval.operationDigest === plan.planDigest
+	);
 }
 
 type SqlProposal =
@@ -286,7 +336,7 @@ function scoreTable(table: DbTable, tokens: ReadonlySet<string>): number {
 	return score;
 }
 
-function validateCatalog(catalog: DbSchemaCatalog): string | undefined {
+export function validateCatalog(catalog: DbSchemaCatalog): string | undefined {
 	if (!catalog.datasource.trim()) {
 		return "Catalog datasource is required";
 	}
@@ -309,6 +359,44 @@ function validateCatalog(catalog: DbSchemaCatalog): string | undefined {
 	return undefined;
 }
 
+function parseCatalogTable(value: unknown): DbTable {
+	if (!isRecord(value) || !Array.isArray(value.columns)) {
+		throw new Error(
+			"DATABASE_SCHEMA_CATALOG_JSON tables must contain schema, name, and columns",
+		);
+	}
+	return {
+		schema: typeof value.schema === "string" ? value.schema : "",
+		name: typeof value.name === "string" ? value.name : "",
+		...(typeof value.description === "string"
+			? { description: value.description }
+			: {}),
+		columns: value.columns.map(parseCatalogColumn),
+	};
+}
+
+function parseCatalogColumn(value: unknown): DbColumn {
+	if (!isRecord(value)) {
+		throw new Error(
+			"DATABASE_SCHEMA_CATALOG_JSON columns must be JSON objects",
+		);
+	}
+	return {
+		name: typeof value.name === "string" ? value.name : "",
+		...(typeof value.type === "string" ? { type: value.type } : {}),
+		...(typeof value.description === "string"
+			? { description: value.description }
+			: {}),
+		...(typeof value.sensitive === "boolean"
+			? { sensitive: value.sensitive }
+			: {}),
+	};
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return Boolean(value) && typeof value === "object" && !Array.isArray(value);
+}
+
 function quoteIdentifier(value: string): string {
 	return value;
 }
@@ -321,7 +409,7 @@ function tokenize(value: string): Set<string> {
 	return new Set(
 		value
 			.toLowerCase()
-			.split(/[^a-z0-9_]+/)
+			.split(/[^\p{L}\p{N}_]+/u)
 			.flatMap((part) => part.split("_"))
 			.filter((part) => part.length >= 2),
 	);

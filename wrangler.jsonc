@@ -98,6 +98,7 @@
 		"DATABASE_DATASOURCE": "",
 		"DATABASE_ALLOWED_SCHEMAS": "",
 		"DATABASE_ALLOWED_TABLES": "",
+		"DATABASE_SCHEMA_CATALOG_JSON": "",
 		"ARTIFACT_RENDERER_URL": "https://capabilities.pakzartl.xyz/artifact/render",
 		"ARTIFACT_SCREENSHOT_TARGETS_JSON": "[{\"id\":\"javis-health\",\"url\":\"https://agent.pakzartl.xyz/health\"}]",
 		"DEPLOY_TARGETS_JSON": "[{\"id\":\"hermes-ovh\",\"displayName\":\"Hermes OVH\",\"environment\":\"production\",\"allowedRepositories\":[\"Pakzartl/poc-line-agent-hermes\"],\"executorUrl\":\"https://deploy.pakzartl.xyz/deploy\",\"healthcheckUrl\":\"https://hermes.pakzartl.xyz/health\"}]"

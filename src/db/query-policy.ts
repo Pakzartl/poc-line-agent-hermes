@@ -93,6 +93,10 @@ export function planReadOnlyQuery(input: {
 	if (unsafeFunctionPattern.test(sql)) {
 		return { ok: false, reason: "SQL contains a blocked function" };
 	}
+	const relationSyntaxError = validateSupportedRelationSyntax(sql);
+	if (relationSyntaxError) {
+		return { ok: false, reason: relationSyntaxError };
+	}
 
 	const paramError = validateParameters(sql, params);
 	if (paramError) {
@@ -139,6 +143,77 @@ export function planReadOnlyQuery(input: {
 		},
 	};
 }
+
+function validateSupportedRelationSyntax(sql: string): string | undefined {
+	if (sql.includes('"')) {
+		return "Quoted SQL identifiers are not supported";
+	}
+	const fromClauseAtDepth = new Map<number, boolean>();
+	let depth = 0;
+	let index = 0;
+	while (index < sql.length) {
+		const char = sql[index];
+		if (char === "'") {
+			index += 1;
+			while (index < sql.length) {
+				if (sql[index] !== "'") {
+					index += 1;
+					continue;
+				}
+				if (sql[index + 1] === "'") {
+					index += 2;
+					continue;
+				}
+				index += 1;
+				break;
+			}
+			continue;
+		}
+		if (char === "(") {
+			depth += 1;
+			index += 1;
+			continue;
+		}
+		if (char === ")") {
+			fromClauseAtDepth.delete(depth);
+			depth = Math.max(0, depth - 1);
+			index += 1;
+			continue;
+		}
+		if (char === "," && fromClauseAtDepth.get(depth)) {
+			return "Comma joins are not supported";
+		}
+		if (/[A-Za-z_]/.test(char ?? "")) {
+			const start = index;
+			index += 1;
+			while (/[A-Za-z0-9_$]/.test(sql[index] ?? "")) index += 1;
+			const word = sql.slice(start, index).toLowerCase();
+			if (word === "from") {
+				fromClauseAtDepth.set(depth, true);
+			} else if (relationClauseBoundaries.has(word)) {
+				fromClauseAtDepth.set(depth, false);
+			}
+			continue;
+		}
+		index += 1;
+	}
+	return undefined;
+}
+
+const relationClauseBoundaries = new Set([
+	"where",
+	"group",
+	"order",
+	"having",
+	"limit",
+	"offset",
+	"union",
+	"intersect",
+	"except",
+	"window",
+	"fetch",
+	"for",
+]);
 
 export function maskQueryRows(
 	rows: readonly Record<string, unknown>[],
@@ -354,7 +429,7 @@ function fingerprintSql(sql: string): string {
 	return `q_${(hash >>> 0).toString(16).padStart(8, "0")}`;
 }
 
-const defaultMaskColumns = [
+export const defaultMaskColumns = [
 	"email",
 	"phone",
 	"mobile",

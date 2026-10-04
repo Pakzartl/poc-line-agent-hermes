@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { createMemoryCapabilityJobStore } from "../capabilities/job-store";
 import { loadConfig } from "../config";
+import {
+	planNaturalLanguageDatabaseQuery,
+	type DatabasePlanningContext,
+} from "../db/nl-planner";
 import { createDeployPlan } from "../deploy/plan";
 import { createPassThroughTelegramUpdateStore } from "../telegram/update-store";
 import type { DiscordJob } from "./job";
@@ -114,7 +118,7 @@ describe("Discord interactions webhook", () => {
 		expect(jobs[0]?.text).toContain("Human Test Plan");
 	});
 
-	test("queues database command as a guarded capability job", async () => {
+	test("fails closed before queueing when database capability is disabled", async () => {
 		const jobs: DiscordJob[] = [];
 		const fixture = await discordFixture({
 			id: "db-disabled",
@@ -133,18 +137,53 @@ describe("Discord interactions webhook", () => {
 			deps(fixture.publicKey, jobs),
 		);
 
+		const payload = (await response.json()) as {
+			type: number;
+			data: { content: string; flags: number };
+		};
+		expect(payload.type).toBe(4);
+		expect(payload.data.content).toContain("database queries are disabled");
+		expect(jobs).toHaveLength(0);
+	});
+
+	test("queues an immutable natural-language database plan", async () => {
+		const jobs: DiscordJob[] = [];
+		const store = createMemoryCapabilityJobStore();
+		const fixture = await discordFixture({
+			id: "db-planned",
+			application_id: "123",
+			token: "token",
+			type: 2,
+			channel_id: "channel",
+			guild_id: "6001",
+			member: { user: { id: "9001" } },
+			data: {
+				name: "db",
+				options: [{ name: "question", value: "show learner users status" }],
+			},
+		});
+		const response = await handleDiscordInteraction(
+			fixture.request,
+			deps(fixture.publicKey, jobs, {
+				capabilityJobStore: store,
+				databasePlanningContext,
+			}),
+		);
+
 		expect((await response.json()) as unknown).toEqual({
 			type: 5,
 			data: { flags: 64 },
 		});
 		expect(jobs).toHaveLength(1);
-		expect(jobs[0]).toMatchObject({
-			question: "how many users signed up?",
-			capability: {
-				kind: "database_query",
-				question: "how many users signed up?",
-			},
+		expect(jobs[0]?.databasePlan).toMatchObject({
+			question: "show learner users status",
+			sql: "SELECT status FROM public.users LIMIT 50",
+			requestedBy: "9001",
 		});
+		expect(jobs[0]?.canonicalInputHash).toBe(jobs[0]?.databasePlan?.planDigest);
+		expect((await store.getJob("db-planned"))?.metadata.databasePlan).toContain(
+			'"version":"DB_NL_PLAN_V1"',
+		);
 	});
 
 	test("queues artifact command as a guarded capability job", async () => {
@@ -356,6 +395,77 @@ describe("Discord interactions webhook", () => {
 			"approved",
 		);
 		expect((await store.getJob("request-1"))?.status).toBe("running");
+	});
+
+	test("binds database approval to the stored immutable plan and queues execution", async () => {
+		const jobs: DiscordJob[] = [];
+		const store = createMemoryCapabilityJobStore();
+		const planned = await planNaturalLanguageDatabaseQuery({
+			question: "show learner users status",
+			catalog: databasePlanningContext.catalog,
+			policy: databasePlanningContext.policy,
+			requestId: "db-request-1",
+			requestedBy: "9001",
+			now: "2026-10-05T00:00:00.000Z",
+		});
+		expect(planned.ok).toBe(true);
+		if (!planned.ok) return;
+		await store.createJob({
+			jobId: "db-request-1",
+			capability: "database_query",
+			userId: "9001",
+			guildId: "6001",
+			actionDigest: planned.plan.planDigest,
+			objective: planned.plan.question,
+			metadata: { databasePlan: JSON.stringify(planned.plan) },
+		});
+		await store.transitionJob({
+			jobId: "db-request-1",
+			from: "queued",
+			to: "running",
+		});
+		await store.requestApproval({
+			approvalId: "approval_db_db-request-1",
+			jobId: "db-request-1",
+			userId: "9001",
+			guildId: "6001",
+			action: "run database query",
+			actionDigest: planned.plan.planDigest,
+		});
+		const fixture = await discordFixture({
+			id: "db-component",
+			application_id: "123",
+			token: "token",
+			type: 3,
+			channel_id: "channel",
+			guild_id: "6001",
+			member: { user: { id: "9001" } },
+			data: { custom_id: "cap:approve:approval_db_db-request-1" },
+		});
+		const response = await handleDiscordInteraction(
+			fixture.request,
+			deps(fixture.publicKey, jobs, {
+				capabilityJobStore: store,
+				databasePlanningContext,
+			}),
+		);
+
+		expect((await response.json()) as unknown).toEqual({
+			type: 5,
+			data: { flags: 64 },
+		});
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0]).toMatchObject({
+			action: "db_execute",
+			capabilityJobId: "db-request-1",
+			databaseApprovalId: "approval_db_db-request-1",
+			approvedBy: "9001",
+			databasePlan: { planDigest: planned.plan.planDigest },
+		});
+		expect((await store.getApproval("approval_db_db-request-1"))?.status).toBe(
+			"approved",
+		);
+		expect((await store.getJob("db-request-1"))?.status).toBe("running");
 	});
 
 	test("rejects deploy approval from another user or guild", async () => {
@@ -668,7 +778,11 @@ describe("Discord interactions webhook", () => {
 	});
 });
 
-function deps(publicKey: string, jobs: DiscordJob[] = []): DiscordWebhookDeps {
+function deps(
+	publicKey: string,
+	jobs: DiscordJob[] = [],
+	overrides: Partial<DiscordWebhookDeps> = {},
+): DiscordWebhookDeps {
 	return {
 		config: loadConfig({
 			DISCORD_APPLICATION_ID: "123",
@@ -682,8 +796,37 @@ function deps(publicKey: string, jobs: DiscordJob[] = []): DiscordWebhookDeps {
 			},
 		},
 		discordUpdateStore: createPassThroughTelegramUpdateStore(),
+		...overrides,
 	};
 }
+
+const databasePlanningContext: DatabasePlanningContext = {
+	catalog: {
+		datasource: "lms-readonly",
+		tables: [
+			{
+				schema: "public",
+				name: "users",
+				description: "learner users",
+				columns: [
+					{ name: "id" },
+					{ name: "email", sensitive: true },
+					{ name: "status" },
+				],
+			},
+		],
+	},
+	policy: {
+		enabled: true,
+		datasource: "lms-readonly",
+		allowedSchemas: ["public"],
+		allowedTables: ["public.users"],
+		maxRows: 50,
+		maxBytes: 50_000,
+		timeoutMs: 2_000,
+		maskColumns: ["email"],
+	},
+};
 
 async function pendingDeployApproval(now?: string) {
 	const store = createMemoryCapabilityJobStore();

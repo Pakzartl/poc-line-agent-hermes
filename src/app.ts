@@ -9,6 +9,11 @@ import {
 import type { AppConfig } from "./config";
 import { createDatabaseReadClient, type DatabaseReadClient } from "./db/client";
 import {
+	parseDbSchemaCatalogJson,
+	type DatabasePlanningContext,
+} from "./db/nl-planner";
+import { defaultMaskColumns } from "./db/query-policy";
+import {
 	createInlineDiscordJobQueue,
 	type DiscordJobQueue,
 } from "./discord/job";
@@ -55,6 +60,7 @@ export type AppDeps = {
 	discordUpdateStore: TelegramUpdateStore;
 	capabilityJobStore?: CapabilityJobStore;
 	databaseReadClient?: DatabaseReadClient;
+	databasePlanningContext?: DatabasePlanningContext;
 	telegramSourceSelectionStore?: TelegramSourceSelectionStore;
 	discordSourceSelectionStore?: TelegramSourceSelectionStore;
 	telegramCodeSourceClient?: ReturnType<typeof createTelegramCodeSourceClient>;
@@ -121,26 +127,51 @@ export function createAppDeps(
 	const capabilityJobStore =
 		options.capabilityJobStore ?? createMemoryCapabilityJobStore();
 	const databaseConfig = config.capabilities;
-	const databaseReadClient =
+	const databaseConfigured = Boolean(
 		databaseConfig?.databaseAdapterUrl &&
-		databaseConfig.databaseAdapterToken &&
-		databaseConfig.databaseDatasource &&
-		databaseConfig.databaseAllowedSchemas.length > 0 &&
-		databaseConfig.databaseAllowedTables.length > 0
+			databaseConfig.databaseAdapterToken &&
+			databaseConfig.databaseDatasource &&
+			databaseConfig.databaseAllowedSchemas.length > 0 &&
+			databaseConfig.databaseAllowedTables.length > 0 &&
+			databaseConfig.databaseSchemaCatalogJson,
+	);
+	const databaseCatalog = databaseConfigured
+		? parseDbSchemaCatalogJson(databaseConfig?.databaseSchemaCatalogJson ?? "")
+		: undefined;
+	const databasePolicy =
+		databaseConfigured && databaseConfig && databaseCatalog
+			? {
+					enabled: true,
+					datasource: databaseConfig.databaseDatasource,
+					allowedSchemas: databaseConfig.databaseAllowedSchemas,
+					allowedTables: databaseConfig.databaseAllowedTables,
+					maxRows: 200,
+					maxBytes: 1_000_000,
+					timeoutMs: 5_000,
+					maskColumns: [
+						...new Set([
+							...defaultMaskColumns,
+							...databaseCatalog.tables.flatMap((table) =>
+								table.columns
+									.filter((column) => column.sensitive)
+									.map((column) => column.name),
+							),
+						]),
+					],
+				}
+			: undefined;
+	const databaseReadClient =
+		databaseConfig && databasePolicy
 			? createDatabaseReadClient({
 					endpoint: databaseConfig.databaseAdapterUrl,
 					token: databaseConfig.databaseAdapterToken,
-					policy: {
-						enabled: true,
-						datasource: databaseConfig.databaseDatasource,
-						allowedSchemas: databaseConfig.databaseAllowedSchemas,
-						allowedTables: databaseConfig.databaseAllowedTables,
-						maxRows: 200,
-						maxBytes: 1_000_000,
-						timeoutMs: 5_000,
-					},
+					policy: databasePolicy,
 					fetch: fetchImpl,
 				})
+			: undefined;
+	const databasePlanningContext =
+		databaseCatalog && databasePolicy
+			? { catalog: databaseCatalog, policy: databasePolicy }
 			: undefined;
 	const baseDeps = {
 		config,
@@ -159,6 +190,7 @@ export function createAppDeps(
 			options.telegramUpdateStore ?? createPassThroughTelegramUpdateStore(),
 		capabilityJobStore,
 		...(databaseReadClient ? { databaseReadClient } : {}),
+		...(databasePlanningContext ? { databasePlanningContext } : {}),
 		...(options.hermesClient ? { hermesClient: options.hermesClient } : {}),
 		whatsAppReplyClient,
 		memoryStore: options.memoryStore,
