@@ -102,7 +102,9 @@ export function buildChromiumCommand(input: {
 		"--virtual-time-budget=5000",
 		`--proxy-server=http://127.0.0.1:${input.proxyPort}`,
 		"--proxy-bypass-list=<-loopback>",
-		"--host-resolver-rules=MAP * ~NOTFOUND",
+		// Keep Chromium from resolving destinations directly, while allowing it to
+		// reach the loopback-only validating proxy itself.
+		"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
 		`--screenshot=${input.output}`,
 		input.url.toString(),
 	];

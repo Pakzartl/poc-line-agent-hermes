@@ -17,7 +17,9 @@ describe("capability renderer isolation", () => {
 
 		expect(command).toContain("--proxy-server=http://127.0.0.1:43123");
 		expect(command).toContain("--proxy-bypass-list=<-loopback>");
-		expect(command).toContain("--host-resolver-rules=MAP * ~NOTFOUND");
+		expect(command).toContain(
+			"--host-resolver-rules=MAP * ~NOTFOUND, EXCLUDE 127.0.0.1",
+		);
 		expect(command).toContain("--disable-quic");
 		expect(command).toContain(
 			"--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
