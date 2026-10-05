@@ -63,7 +63,7 @@ The bridge requests `Guilds`, `GuildMessages`, `DirectMessages`, and `MessageCon
 - Keep tunnel credentials outside git with root-only permissions.
 - Run `cloudflared` as an enabled systemd service and keep its metrics listener on loopback.
 - Keep the Hermes Compose port bound to `127.0.0.1`.
-- Keep the capability adapter bound to `127.0.0.1:8788`. Its artifact route requires a bearer token and resolves only server-owned target ids; never accept a user-supplied URL.
+- Keep the capability adapter bound to `127.0.0.1:8788`. Its artifact route requires a bearer token and accepts exactly one server-owned target id or credential-free public HTTPS URL. Dynamic URLs are revalidated on the adapter, rejected when they are local/private, DNS-checked, pinned to the resolved public address, and prevented from navigating to a different host.
 - Keep the DB adapter disabled unless a read-only PostgreSQL datasource is approved. Its `/db/query` route requires bearer auth, validates datasource alias, Worker fingerprint, request limits, SQL read-only shape, and parameter safety, then runs through `psql` inside a read-only transaction.
 - Keep the deploy executor bound to loopback and its bearer token synchronized with the Worker's `DEPLOY_EXECUTOR_TOKEN`. It accepts only `DEPLOY_PLAN_V1`, an allowlisted repository, an immutable SHA, and the matching idempotency key. It never accepts arbitrary commands and never auto-rolls back.
 - Require `API_SERVER_KEY` bearer auth on every Worker-to-Hermes call.

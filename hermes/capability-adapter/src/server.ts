@@ -4,6 +4,7 @@ import {
 	type CapabilityAdapterConfig,
 } from "./config";
 import { renderScreenshot, type ScreenshotRenderer } from "./renderer";
+import { assertSafePublicHttpsUrl } from "./url-policy";
 
 const maxRequestBytes = 8_192;
 
@@ -37,24 +38,52 @@ export function createCapabilityAdapterHandler(input: {
 		} catch {
 			return Response.json({ error: "invalid JSON" }, { status: 400 });
 		}
-		const targetId =
+		const record =
 			body && typeof body === "object"
-				? (body as Record<string, unknown>).targetId
+				? (body as Record<string, unknown>)
 				: undefined;
-		if (typeof targetId !== "string") {
-			return Response.json({ error: "targetId is required" }, { status: 400 });
+		const targetId = record?.targetId;
+		const requestedUrl = record?.url;
+		if ((typeof targetId === "string") === (typeof requestedUrl === "string")) {
+			return Response.json(
+				{ error: "exactly one targetId or url is required" },
+				{ status: 400 },
+			);
 		}
-		const target = input.config.artifactTargets.find(
-			(candidate) => candidate.id === targetId,
-		);
-		if (!target) {
+		const target =
+			typeof targetId === "string"
+				? input.config.artifactTargets.find(
+						(candidate) => candidate.id === targetId,
+					)
+				: undefined;
+		if (typeof targetId === "string" && !target) {
 			return Response.json(
 				{ error: "artifact target is not allowlisted" },
 				{ status: 404 },
 			);
 		}
+		let captureUrl = target?.url;
+		if (typeof requestedUrl === "string") {
+			try {
+				captureUrl = assertSafePublicHttpsUrl(
+					requestedUrl,
+					"screenshot URL",
+				).toString();
+			} catch {
+				return Response.json(
+					{ error: "screenshot URL must use a public HTTPS host" },
+					{ status: 400 },
+				);
+			}
+		}
+		if (!captureUrl) {
+			return Response.json(
+				{ error: "screenshot URL is missing" },
+				{ status: 400 },
+			);
+		}
 		try {
-			const image = await render(target.url);
+			const image = await render(captureUrl);
 			return new Response(image, {
 				headers: {
 					"Content-Type": "image/png",
@@ -66,7 +95,8 @@ export function createCapabilityAdapterHandler(input: {
 			console.error(
 				JSON.stringify({
 					message: "artifact render failed",
-					targetId,
+					targetId: typeof targetId === "string" ? targetId : undefined,
+					hostname: new URL(captureUrl).hostname,
 					error: error instanceof Error ? error.message : "unknown error",
 				}),
 			);

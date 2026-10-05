@@ -33,6 +33,7 @@ export async function createArtifact(input: {
 	name: string;
 	content?: unknown;
 	targetId?: string;
+	url?: string;
 	renderer?: ScreenshotRendererConfig;
 	fetch?: FetchLike;
 }): Promise<ArtifactFile> {
@@ -41,6 +42,7 @@ export async function createArtifact(input: {
 		return captureKnownTarget({
 			name: baseName,
 			targetId: input.targetId,
+			url: input.url,
 			renderer: input.renderer,
 			fetch: input.fetch,
 		});
@@ -102,18 +104,27 @@ export function parseScreenshotTargets(
 async function captureKnownTarget(input: {
 	name: string;
 	targetId?: string;
+	url?: string;
 	renderer?: ScreenshotRendererConfig;
 	fetch?: FetchLike;
 }): Promise<ArtifactFile> {
 	if (!input.renderer?.endpoint || !input.renderer.token.trim()) {
 		throw new Error("Screenshot renderer is not configured");
 	}
-	const target = input.renderer.targets.find(
-		(candidate) => candidate.id === input.targetId,
-	);
-	if (!target) {
+	if (Boolean(input.targetId) === Boolean(input.url)) {
+		throw new Error("Screenshot requires exactly one targetId or URL");
+	}
+	const target = input.targetId
+		? input.renderer.targets.find(
+				(candidate) => candidate.id === input.targetId,
+			)
+		: undefined;
+	if (input.targetId && !target) {
 		throw new Error("Screenshot target is not allowlisted");
 	}
+	const screenshotUrl = input.url
+		? assertSafePublicHttpsUrl(input.url, "Screenshot URL").toString()
+		: undefined;
 	const endpoint = new URL(input.renderer.endpoint);
 	if (endpoint.protocol !== "https:") {
 		throw new Error("Screenshot renderer endpoint must use HTTPS");
@@ -124,7 +135,9 @@ async function captureKnownTarget(input: {
 			Authorization: `Bearer ${input.renderer.token}`,
 			"Content-Type": "application/json",
 		},
-		body: JSON.stringify({ targetId: target.id }),
+		body: JSON.stringify(
+			screenshotUrl ? { url: screenshotUrl } : { targetId: target?.id },
+		),
 	});
 	if (!response.ok) {
 		throw new Error(`Screenshot renderer failed (${response.status})`);

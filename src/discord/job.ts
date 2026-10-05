@@ -674,8 +674,12 @@ async function captureArtifact(
 	}
 	const artifact = await createArtifact({
 		kind: "screenshot",
-		name: `${job.capability.targetId}-${job.interactionId}`,
+		name: `${
+			job.capability.targetId ??
+			(job.capability.url ? new URL(job.capability.url).hostname : "screenshot")
+		}-${job.interactionId}`,
 		targetId: job.capability.targetId,
+		url: job.capability.url,
 		renderer: {
 			endpoint: config.artifactRendererUrl,
 			token: config.artifactRendererToken,
@@ -684,7 +688,9 @@ async function captureArtifact(
 		fetch: deps.fetch,
 	});
 	return {
-		text: `Captured allowlisted artifact target \`${job.capability.targetId}\`.`,
+		text: job.capability.url
+			? `Captured public HTTPS page \`${job.capability.url}\`.`
+			: `Captured allowlisted artifact target \`${job.capability.targetId}\`.`,
 		attachment: {
 			filename: artifact.filename,
 			contentType: artifact.contentType,

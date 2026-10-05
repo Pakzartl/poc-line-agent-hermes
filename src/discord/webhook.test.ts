@@ -225,6 +225,76 @@ describe("Discord interactions webhook", () => {
 		});
 	});
 
+	test("queues a screenshot for the explicit public HTTPS URL", async () => {
+		const jobs: DiscordJob[] = [];
+		const fixture = await discordFixture({
+			id: "artifact-url",
+			application_id: "123",
+			token: "token",
+			type: 2,
+			channel_id: "channel",
+			member: { user: { id: "9001" } },
+			data: {
+				name: "artifact",
+				options: [
+					{ name: "kind", value: "screenshot" },
+					{ name: "request", value: "capture the documentation" },
+					{ name: "url", value: "https://example.com/docs" },
+				],
+			},
+		});
+		const response = await handleDiscordInteraction(
+			fixture.request,
+			deps(fixture.publicKey, jobs),
+		);
+
+		expect(response.status).toBe(200);
+		expect(jobs[0]?.capability).toEqual({
+			kind: "artifact_request",
+			artifactKind: "screenshot",
+			request: "capture the documentation",
+			url: "https://example.com/docs",
+		});
+	});
+
+	test("rejects unsafe or ambiguous screenshot targets", async () => {
+		for (const options of [
+			[
+				{ name: "kind", value: "screenshot" },
+				{ name: "request", value: "capture private page" },
+				{ name: "url", value: "https://127.0.0.1/admin" },
+			],
+			[
+				{ name: "kind", value: "screenshot" },
+				{ name: "request", value: "capture one page" },
+				{ name: "target_id", value: "javis-health" },
+				{ name: "url", value: "https://example.com" },
+			],
+		]) {
+			const jobs: DiscordJob[] = [];
+			const fixture = await discordFixture({
+				id: `artifact-invalid-${jobs.length}`,
+				application_id: "123",
+				token: "token",
+				type: 2,
+				channel_id: "channel",
+				member: { user: { id: "9001" } },
+				data: { name: "artifact", options },
+			});
+			const response = await handleDiscordInteraction(
+				fixture.request,
+				deps(fixture.publicKey, jobs),
+			);
+
+			expect(response.status).toBe(200);
+			expect(jobs).toHaveLength(0);
+			const body = (await response.json()) as { data?: { content?: string } };
+			expect(body.data?.content).toMatch(
+				/public HTTPS|either target_id or url/i,
+			);
+		}
+	});
+
 	test("requires immutable commit sha for disabled deploy command", async () => {
 		const jobs: DiscordJob[] = [];
 		const fixture = await discordFixture({

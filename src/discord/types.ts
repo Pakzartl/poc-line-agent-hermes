@@ -80,6 +80,7 @@ export type DiscordCapabilityPayload =
 			artifactKind: DiscordArtifactKind;
 			request: string;
 			targetId?: string;
+			url?: string;
 	  }
 	| {
 			kind: "deploy_request";

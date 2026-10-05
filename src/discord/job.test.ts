@@ -513,6 +513,60 @@ Approve after checkout tests pass.`,
 		expect(options.attachment?.contentType).toBe("image/png");
 	});
 
+	test("captures the explicit safe public URL instead of a preset", async () => {
+		const replies: unknown[][] = [];
+		await processDiscordQueueMessage(
+			{
+				body: {
+					...discordJob(),
+					repository: undefined,
+					branch: undefined,
+					question: "capture the docs",
+					capability: {
+						kind: "artifact_request",
+						artifactKind: "screenshot",
+						request: "capture the docs",
+						url: "https://example.com/docs",
+					},
+				},
+				attempts: 1,
+				ack: () => undefined,
+				retry: () => undefined,
+			},
+			{
+				config: loadConfig({
+					ARTIFACT_RENDERER_URL: "https://renderer.example/capture",
+					ARTIFACT_RENDERER_TOKEN: "renderer-token",
+					ARTIFACT_SCREENSHOT_TARGETS_JSON: "[]",
+				}),
+				orchestrator: { answer: async () => "must not run" },
+				discordReplyClient: {
+					reply: async (...args) => {
+						replies.push(args);
+					},
+					replyToChannel: async () => undefined,
+					sendTyping: async () => undefined,
+				},
+				discordUpdateStore: createPassThroughTelegramUpdateStore(),
+				memoryStore: memoryStore(),
+				fetch: async (_input, init) => {
+					expect(JSON.parse(String(init?.body))).toEqual({
+						url: "https://example.com/docs",
+					});
+					return new Response(new Uint8Array([137, 80, 78, 71]), {
+						headers: { "Content-Type": "image/png" },
+					});
+				},
+			},
+		);
+
+		const options = replies[0]?.[3] as {
+			attachment?: { filename: string; contentType: string; data: Uint8Array };
+		};
+		expect(options.attachment?.filename).toStartWith("example.com-");
+		expect(options.attachment?.contentType).toBe("image/png");
+	});
+
 	test("generates a validated CSV artifact through the model-only path", async () => {
 		const replies: unknown[][] = [];
 		await processDiscordQueueMessage(

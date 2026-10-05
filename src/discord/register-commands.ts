@@ -110,12 +110,19 @@ export const discordCommands = [
 			{
 				type: stringOptionType,
 				name: "target_id",
-				description:
-					"Required for screenshot; server-side allowlisted target id",
+				description: "Screenshot preset; use this or url, not both",
 				required: false,
 				autocomplete: true,
 				min_length: 1,
 				max_length: 200,
+			},
+			{
+				type: stringOptionType,
+				name: "url",
+				description: "Public HTTPS page to capture; use this or target_id",
+				required: false,
+				min_length: 9,
+				max_length: 2_000,
 			},
 		],
 	},

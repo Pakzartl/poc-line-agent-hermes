@@ -135,23 +135,23 @@ export const capabilityManifests = [
 		id: "artifact",
 		name: "/artifact",
 		description:
-			"Create Markdown, JSON, CSV, Mermaid diagram, or an allowlisted screenshot artifact.",
+			"Create Markdown, JSON, CSV, Mermaid diagram, or a safe public-HTTPS screenshot artifact.",
 		inputContract:
-			"artifact kind and request; screenshots additionally require a server-side allowlisted target id",
+			"artifact kind and request; screenshots additionally require either a preset target id or a public HTTPS URL",
 		permissions: ["artifact:create"],
 		steps: [
 			"Validate the requested artifact kind and bounded model output",
-			"For screenshots, validate the server-side target allowlist and call the sandboxed renderer",
+			"For screenshots, validate the preset or public HTTPS URL and call the sandboxed renderer",
 			"Attach the artifact to the Discord response",
 		],
 		outputArtifact: "Markdown, JSON, CSV, Mermaid text, PNG, or JPEG artifact",
 		maxOutputBytes: 7_500_000,
 		verification: [
 			"Structured JSON/CSV output is parsed before attachment",
-			"No user-provided URL reaches the screenshot renderer",
+			"Public screenshot URLs are revalidated, DNS-checked, and IP-pinned by the renderer",
 		],
 		failureBehavior:
-			"Reject invalid structured output and fail closed without opening a page when the renderer or target allowlist is unavailable.",
+			"Reject invalid structured output and fail closed without opening a page when the renderer is unavailable or the target is unsafe.",
 		demo: "/artifact kind:diagram request:draw the request lifecycle",
 	},
 	{

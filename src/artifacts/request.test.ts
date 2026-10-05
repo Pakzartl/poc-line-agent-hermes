@@ -53,6 +53,29 @@ describe("artifact requests", () => {
 		expect(file.filename).toBe("home-page.png");
 	});
 
+	test("sends a validated public HTTPS URL to the renderer", async () => {
+		const file = await createArtifact({
+			kind: "screenshot",
+			name: "requested page",
+			url: "https://example.com/docs?view=full",
+			renderer: {
+				endpoint: "https://renderer.example.com/capture",
+				token: "secret",
+				targets: [],
+			},
+			fetch: async (_input, init) => {
+				expect(JSON.parse(String(init?.body))).toEqual({
+					url: "https://example.com/docs?view=full",
+				});
+				return new Response(new Uint8Array([1, 2, 3]), {
+					headers: { "Content-Type": "image/png" },
+				});
+			},
+		});
+
+		expect(file.filename).toBe("requested-page.png");
+	});
+
 	test("rejects arbitrary or unsafe screenshot URLs", () => {
 		expect(() =>
 			parseScreenshotTargets(
@@ -69,6 +92,28 @@ describe("artifact requests", () => {
 			expect(() =>
 				parseScreenshotTargets(JSON.stringify([{ id: "unsafe", url }])),
 			).toThrow("public HTTPS host");
+		}
+	});
+
+	test("rejects unsafe direct screenshot URLs before calling the renderer", async () => {
+		for (const url of [
+			"http://example.com",
+			"https://127.0.0.1/admin",
+			"https://169.254.169.254/latest/meta-data",
+			"https://service.internal/admin",
+		]) {
+			await expect(
+				createArtifact({
+					kind: "screenshot",
+					name: "unsafe",
+					url,
+					renderer: {
+						endpoint: "https://renderer.example.com/capture",
+						token: "secret",
+						targets: [],
+					},
+				}),
+			).rejects.toThrow();
 		}
 	});
 });

@@ -1,4 +1,5 @@
 import { parseScreenshotTargets } from "../artifacts/request";
+import { assertSafePublicHttpsUrl } from "../artifacts/url-policy";
 import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
 import { renderSkillContractInventory } from "../capabilities/skill-contract";
@@ -873,6 +874,7 @@ function parseCommand(
 	if (command === "artifact") {
 		const artifactKind = stringOption(options, "kind")?.trim();
 		const targetId = stringOption(options, "target_id")?.trim();
+		const requestedUrl = stringOption(options, "url")?.trim();
 		const request = stringOption(options, "request")?.trim();
 		if (!isArtifactKind(artifactKind) || !request) {
 			return {
@@ -880,10 +882,23 @@ function parseCommand(
 				error: "The kind and request options are required.",
 			};
 		}
-		if (artifactKind === "screenshot" && !targetId) {
+		if (artifactKind === "screenshot" && !targetId && !requestedUrl) {
 			return {
 				ok: false,
-				error: "Screenshot artifacts require an allowlisted target_id.",
+				error:
+					"Screenshot artifacts require either target_id or a public HTTPS url.",
+			};
+		}
+		if (artifactKind === "screenshot" && targetId && requestedUrl) {
+			return {
+				ok: false,
+				error: "Choose either target_id or url for a screenshot, not both.",
+			};
+		}
+		if (artifactKind !== "screenshot" && (targetId || requestedUrl)) {
+			return {
+				ok: false,
+				error: "target_id and url are only valid for screenshot artifacts.",
 			};
 		}
 		if (targetId && !isSafeCapabilityId(targetId)) {
@@ -891,6 +906,20 @@ function parseCommand(
 				ok: false,
 				error: "Artifact target_id must be a safe allowlist id.",
 			};
+		}
+		let screenshotUrl: string | undefined;
+		if (requestedUrl) {
+			try {
+				screenshotUrl = assertSafePublicHttpsUrl(
+					requestedUrl,
+					"Screenshot URL",
+				).toString();
+			} catch {
+				return {
+					ok: false,
+					error: "Screenshot url must be a credential-free public HTTPS URL.",
+				};
+			}
 		}
 		return {
 			ok: true,
@@ -902,6 +931,7 @@ function parseCommand(
 				text: [
 					`artifact kind: ${artifactKind}`,
 					targetId ? `target: ${targetId}` : "",
+					screenshotUrl ? `url: ${screenshotUrl}` : "",
 					request,
 				]
 					.filter(Boolean)
@@ -912,6 +942,7 @@ function parseCommand(
 					artifactKind,
 					request,
 					...(targetId ? { targetId } : {}),
+					...(screenshotUrl ? { url: screenshotUrl } : {}),
 				},
 			},
 		};

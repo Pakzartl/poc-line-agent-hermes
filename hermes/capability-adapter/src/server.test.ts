@@ -72,6 +72,60 @@ describe("capability adapter", () => {
 		expect(rendered).toEqual(["https://agent.example/health"]);
 	});
 
+	test("renders an authenticated safe public HTTPS URL", async () => {
+		const rendered: string[] = [];
+		const handler = createCapabilityAdapterHandler({
+			config,
+			render: async (url) => {
+				rendered.push(url);
+				return new Uint8Array([137, 80, 78, 71]);
+			},
+		});
+		const response = await handler(
+			new Request("http://adapter.test/artifact/render", {
+				method: "POST",
+				headers: {
+					Authorization: `Bearer ${"a".repeat(32)}`,
+					"Content-Type": "application/json",
+				},
+				body: JSON.stringify({ url: "https://example.com/docs" }),
+			}),
+		);
+
+		expect(response.status).toBe(200);
+		expect(rendered).toEqual(["https://example.com/docs"]);
+	});
+
+	test("rejects unsafe direct URLs before rendering", async () => {
+		let renders = 0;
+		const handler = createCapabilityAdapterHandler({
+			config,
+			render: async () => {
+				renders += 1;
+				return new Uint8Array([137, 80, 78, 71]);
+			},
+		});
+		for (const url of [
+			"http://example.com",
+			"https://127.0.0.1/admin",
+			"https://169.254.169.254/latest/meta-data",
+			"https://service.internal/admin",
+		]) {
+			const response = await handler(
+				new Request("http://adapter.test/artifact/render", {
+					method: "POST",
+					headers: {
+						Authorization: `Bearer ${"a".repeat(32)}`,
+						"Content-Type": "application/json",
+					},
+					body: JSON.stringify({ url }),
+				}),
+			);
+			expect(response.status).toBe(400);
+		}
+		expect(renders).toBe(0);
+	});
+
 	test("rejects private or local artifact targets during config load", () => {
 		for (const url of [
 			"https://127.0.0.1/health",
