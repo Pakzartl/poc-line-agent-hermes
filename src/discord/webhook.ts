@@ -1,5 +1,5 @@
 import { parseScreenshotTargets } from "../artifacts/request";
-import { assertSafePublicHttpsUrl } from "../artifacts/url-policy";
+import { normalizeScreenshotUrl } from "../artifacts/url-policy";
 import type { CapabilityJobStore } from "../capabilities/job-store";
 import { renderCapabilityList } from "../capabilities/manifest";
 import { renderSkillContractInventory } from "../capabilities/skill-contract";
@@ -17,6 +17,7 @@ import {
 } from "../deploy/plan";
 import type { CodeSourceClient } from "../telegram/code-source";
 import { isValidGitRef, isValidRepository } from "../telegram/source-scope";
+import { resolveForecastLocation } from "../weather/location";
 import type { TelegramUpdateStore } from "../telegram/update-store";
 import { type DiscordJob, type DiscordJobQueue, discordSessionId } from "./job";
 import { verifyDiscordRequest } from "./signature";
@@ -755,6 +756,69 @@ function parseCommand(
 		idempotencyKey: `discord:interaction:${interaction.id}`,
 	};
 	const sessionId = discordSessionId(base);
+	if (command === "news") {
+		const question = stringOption(options, "question")?.trim() ?? "";
+		if (!question || question.length > 4_000) {
+			return {
+				ok: false,
+				error: "The question option is required (1–4000 characters).",
+			};
+		}
+		return {
+			ok: true,
+			kind: "job",
+			job: {
+				...base,
+				providerSessionId: `discord:research:${interaction.id}`,
+				action: "news",
+				text: question,
+				question,
+			},
+		};
+	}
+	if (command === "forcast") {
+		const message = stringOption(options, "message")?.trim() ?? "";
+		if (!message || message.length > 4_000) {
+			return {
+				ok: false,
+				error: "The message option is required (1–4000 characters).",
+			};
+		}
+		try {
+			for (const name of ["latitude", "longitude"]) {
+				if (
+					options.some(
+						(option) =>
+							option.name === name && typeof option.value !== "number",
+					)
+				)
+					throw new Error(`Invalid ${name}; use a numeric coordinate.`);
+			}
+			const location = resolveForecastLocation({
+				message,
+				latitude: numberOption(options, "latitude"),
+				longitude: numberOption(options, "longitude"),
+			});
+			return {
+				ok: true,
+				kind: "job",
+				job: {
+					...base,
+					providerSessionId: `discord:radar:${interaction.id}`,
+					action: "forecast",
+					text: JSON.stringify({ command: "forcast", message, ...location }),
+					question: message,
+					capability: { kind: "radar_forecast", message, ...location },
+				},
+			};
+		} catch (error) {
+			return {
+				ok: false,
+				error:
+					error instanceof Error ? error.message : "Invalid forecast location.",
+			};
+		}
+	}
 	if (command === "clear") {
 		return {
 			ok: true,
@@ -910,14 +974,12 @@ function parseCommand(
 		let screenshotUrl: string | undefined;
 		if (requestedUrl) {
 			try {
-				screenshotUrl = assertSafePublicHttpsUrl(
-					requestedUrl,
-					"Screenshot URL",
-				).toString();
+				screenshotUrl = normalizeScreenshotUrl(requestedUrl);
 			} catch {
 				return {
 					ok: false,
-					error: "Screenshot url must be a credential-free public HTTPS URL.",
+					error:
+						"Screenshot url must be a credential-free public HTTPS URL (for example, https://example.com). Bare domains also work.",
 				};
 			}
 		}
@@ -1020,7 +1082,7 @@ function parseCommand(
 	return {
 		ok: false,
 		error:
-			"Unknown command. Use /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, or /clear.",
+			"Unknown command. Use /forcast, /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, or /clear.",
 	};
 }
 

@@ -6,6 +6,17 @@ const unsafeHostnameSuffixes = [
 	".lan",
 ];
 
+// Accept a bare domain at the user-input boundary; executor URLs stay strict.
+export function normalizeScreenshotUrl(value: string): string {
+	const input = value.trim();
+	const bareDomain =
+		/^(?:[a-z0-9](?:[a-z0-9-]*[a-z0-9])?\.)+[a-z0-9](?:[a-z0-9-]*[a-z0-9])?(?::\d+)?(?:[/?#]|$)/i;
+	return assertSafePublicHttpsUrl(
+		bareDomain.test(input) ? `https://${input}` : input,
+		"Screenshot URL",
+	).toString();
+}
+
 export function assertSafePublicHttpsUrl(value: string, label: string): URL {
 	const url = new URL(value);
 	if (url.protocol !== "https:" || url.username || url.password) {

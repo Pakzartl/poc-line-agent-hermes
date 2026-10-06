@@ -2,23 +2,29 @@ import { createSkillManager, type SkillName } from "./agent/skill-manager";
 import { createAppDeps, createAppHandler } from "./app";
 import { createDurableObjectCapabilityJobStore } from "./capabilities/job-store";
 import { loadConfig, validateConfig } from "./config";
-import { processDiscordQueueMessage, type DiscordJob } from "./discord/job";
+import {
+	type DiscordGatewayMessage,
+	isGatewayMessage,
+	processDiscordIntentMessage,
+} from "./discord/gateway-webhook";
+import { type DiscordJob, processDiscordQueueMessage } from "./discord/job";
 import {
 	processQueueFailureDlqMessage,
 	queueFailureDlqName,
 } from "./events/queue-failure-dlq";
+import { createHermesClient } from "./hermes/client";
 import { createKvSessionMemoryStore } from "./memory/kv-session-memory";
 import apiCatalogSkill from "./skills/api-catalog.md";
 import architectureMapSkill from "./skills/architecture-map.md";
 import bugInvestigatorSkill from "./skills/bug-investigator.md";
+import codeScanSkill from "./skills/code-scan.md";
 import commitReviewSkill from "./skills/commit-review.md";
 import configExplainerSkill from "./skills/config-explainer.md";
 import databaseMapSkill from "./skills/database-map.md";
-import deploySkill from "./skills/deploy.md";
 import dependencyCheckSkill from "./skills/dependency-check.md";
+import deploySkill from "./skills/deploy.md";
 import explainCodeSkill from "./skills/explain-code.md";
 import findCodeSkill from "./skills/find-code.md";
-import codeScanSkill from "./skills/code-scan.md";
 import incidentTriageSkill from "./skills/incident-triage.md";
 import missingTestsSkill from "./skills/missing-tests.md";
 import onboardingGuideSkill from "./skills/onboarding-guide.md";
@@ -35,7 +41,6 @@ import { processTelegramQueueMessage, type TelegramJob } from "./telegram/job";
 import { TelegramSessionCoordinator } from "./telegram/session-coordinator";
 import { createDurableObjectTelegramSourceSelectionStore } from "./telegram/source-selection";
 import { createDurableObjectTelegramUpdateStore } from "./telegram/update-store";
-import { createHermesClient } from "./hermes/client";
 
 const skillDocuments: Readonly<Record<SkillName, string>> = {
 	"repo-overview": repoOverviewSkill,
@@ -100,6 +105,17 @@ export default {
 			return;
 		}
 		for (const message of batch.messages) {
+			if (isDiscordIntentEnvelope(message.body)) {
+				if (!deps.discordSourceSelectionStore || !deps.discordCodeSourceClient)
+					throw new Error("Discord intent dependencies unavailable");
+				await processDiscordIntentMessage(message.body.message, {
+					...deps,
+					discordSourceSelectionStore: deps.discordSourceSelectionStore,
+					discordCodeSourceClient: deps.discordCodeSourceClient,
+				});
+				message.ack();
+				continue;
+			}
 			if (isDiscordQueueEnvelope(message.body)) {
 				await processDiscordQueueMessage(
 					{
@@ -131,6 +147,11 @@ function createWorkerDeps(env: Env) {
 	const config = loadConfig(createConfigEnvironment(env));
 	validateConfig(config);
 	return createAppDeps(config, {
+		discordIntentQueue: {
+			send: async (message) => {
+				await env.TELEGRAM_JOBS.send({ provider: "discord-intent", message });
+			},
+		},
 		memoryStore: createKvSessionMemoryStore(
 			env.SESSION_MEMORY,
 			config.memory.maxMessages,
@@ -170,6 +191,15 @@ function createWorkerDeps(env: Env) {
 
 function createConfigEnvironment(env: Env): Record<string, string | undefined> {
 	return {
+		INTENT_ROUTER_ENABLED: env.INTENT_ROUTER_ENABLED,
+		INTENT_ROUTER_PROTOCOL: env.INTENT_ROUTER_PROTOCOL,
+		INTENT_ROUTER_ENDPOINT_URL: env.INTENT_ROUTER_ENDPOINT_URL,
+		INTENT_ROUTER_CF_ACCESS_CLIENT_ID: env.INTENT_ROUTER_CF_ACCESS_CLIENT_ID,
+		INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET:
+			env.INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET,
+		INTENT_ROUTER_TIMEOUT_MS: env.INTENT_ROUTER_TIMEOUT_MS,
+		INTENT_ROUTER_MIN_PROBABILITY: env.INTENT_ROUTER_MIN_PROBABILITY,
+		INTENT_ROUTER_MIN_MARGIN: env.INTENT_ROUTER_MIN_MARGIN,
 		AGENT_RUNTIME: env.AGENT_RUNTIME,
 		LINE_CHANNEL_SECRET: env.LINE_CHANNEL_SECRET,
 		LINE_CHANNEL_ACCESS_TOKEN: env.LINE_CHANNEL_ACCESS_TOKEN,
@@ -202,20 +232,29 @@ function createConfigEnvironment(env: Env): Record<string, string | undefined> {
 		HERMES_BASE_URL: env.HERMES_BASE_URL,
 		HERMES_API_SERVER_KEY: env.HERMES_API_SERVER_KEY,
 		HERMES_TELEGRAM_ALLOWED_USER_IDS: env.HERMES_TELEGRAM_ALLOWED_USER_IDS,
-		QUEUE_FAILURE_EVENT_SECRET: env.QUEUE_FAILURE_EVENT_SECRET,
+		QUEUE_FAILURE_EVENT_SECRET: optionalSecret(
+			env,
+			"QUEUE_FAILURE_EVENT_SECRET",
+		),
 		QUEUE_FAILURE_DISCORD_CHANNEL_ID: env.QUEUE_FAILURE_DISCORD_CHANNEL_ID,
 		DATABASE_ADAPTER_URL: env.DATABASE_ADAPTER_URL,
-		DATABASE_ADAPTER_TOKEN: env.DATABASE_ADAPTER_TOKEN,
+		DATABASE_ADAPTER_TOKEN: optionalSecret(env, "DATABASE_ADAPTER_TOKEN"),
 		DATABASE_DATASOURCE: env.DATABASE_DATASOURCE,
 		DATABASE_ALLOWED_SCHEMAS: env.DATABASE_ALLOWED_SCHEMAS,
 		DATABASE_ALLOWED_TABLES: env.DATABASE_ALLOWED_TABLES,
 		DATABASE_SCHEMA_CATALOG_JSON: env.DATABASE_SCHEMA_CATALOG_JSON,
 		ARTIFACT_RENDERER_URL: env.ARTIFACT_RENDERER_URL,
-		ARTIFACT_RENDERER_TOKEN: env.ARTIFACT_RENDERER_TOKEN,
+		ARTIFACT_RENDERER_TOKEN: optionalSecret(env, "ARTIFACT_RENDERER_TOKEN"),
 		ARTIFACT_SCREENSHOT_TARGETS_JSON: env.ARTIFACT_SCREENSHOT_TARGETS_JSON,
 		DEPLOY_TARGETS_JSON: env.DEPLOY_TARGETS_JSON,
-		DEPLOY_EXECUTOR_TOKEN: env.DEPLOY_EXECUTOR_TOKEN,
+		DEPLOY_EXECUTOR_TOKEN: optionalSecret(env, "DEPLOY_EXECUTOR_TOKEN"),
 	};
+}
+
+// Adapter secrets are optional; Wrangler only generates required secret types.
+function optionalSecret(env: Env, name: string): string | undefined {
+	const value: unknown = Reflect.get(env, name);
+	return typeof value === "string" ? value : undefined;
 }
 
 type DiscordQueueEnvelope = {
@@ -223,7 +262,25 @@ type DiscordQueueEnvelope = {
 	job: DiscordJob;
 };
 
-type WorkerQueueMessage = TelegramJob | DiscordQueueEnvelope;
+type DiscordIntentEnvelope = {
+	provider: "discord-intent";
+	message: DiscordGatewayMessage;
+};
+type WorkerQueueMessage =
+	| TelegramJob
+	| DiscordQueueEnvelope
+	| DiscordIntentEnvelope;
+
+function isDiscordIntentEnvelope(
+	message: WorkerQueueMessage,
+): message is DiscordIntentEnvelope {
+	return (
+		"provider" in message &&
+		message.provider === "discord-intent" &&
+		"message" in message &&
+		isGatewayMessage(message.message)
+	);
+}
 
 function isDiscordQueueEnvelope(
 	message: WorkerQueueMessage,

@@ -1,0 +1,11 @@
+[Unit]
+Description=Refresh OVH observability snapshot every 10 seconds
+
+[Timer]
+OnBootSec=5s
+OnUnitActiveSec=10s
+AccuracySec=1s
+Unit=poc-line-agent-observability-collector.service
+
+[Install]
+WantedBy=timers.target

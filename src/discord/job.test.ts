@@ -2,15 +2,128 @@ import { describe, expect, test } from "bun:test";
 import { createMemoryCapabilityJobStore } from "../capabilities/job-store";
 import { loadConfig } from "../config";
 import {
-	planNaturalLanguageDatabaseQuery,
 	type DatabasePlanningContext,
+	planNaturalLanguageDatabaseQuery,
 } from "../db/nl-planner";
 import { createDeployPlan } from "../deploy/plan";
+import { HermesApiError } from "../hermes/client";
 import type { SessionMemoryStore } from "../memory/types";
 import { createPassThroughTelegramUpdateStore } from "../telegram/update-store";
-import { type DiscordJob, processDiscordQueueMessage } from "./job";
+import {
+	type DiscordJob,
+	type DiscordJobProcessorDeps,
+	processDiscordQueueMessage,
+} from "./job";
 
 describe("Discord queued jobs", () => {
+	test("news failure is terminal without automatic inference retry or general chat", async () => {
+		const replies: unknown[][] = [];
+		const inputs: string[] = [];
+		const deps = newsTestDeps(replies);
+		const failures: string[] = [];
+		deps.discordUpdateStore.fail = async (input) => {
+			failures.push(input.terminalReason ?? "");
+		};
+		if (!deps.hermesClient) throw new Error("Invalid Hermes fixture");
+		deps.hermesClient.chat = async (input) => {
+			inputs.push(input.sessionId);
+			throw new HermesApiError({
+				message: "timeout",
+				retryable: true,
+				ambiguous: true,
+			});
+		};
+		let acked = false;
+		let retries = 0;
+		await processDiscordQueueMessage(
+			{
+				body: newsTestJob(),
+				attempts: 1,
+				ack: () => {
+					acked = true;
+				},
+				retry: () => {
+					retries++;
+				},
+			},
+			deps,
+		);
+		expect(acked).toBe(true);
+		expect(retries).toBe(0);
+		expect(failures).toEqual(["news-research-failed"]);
+		expect(inputs).toHaveLength(1);
+		expect(inputs[0]).toStartWith("discord:research:");
+		expect(String(replies.at(-1)?.[2])).toContain("ไม่สำเร็จ");
+	});
+
+	test("interrupted news is acknowledged immediately without inference or queue retries", async () => {
+		const replies: unknown[][] = [];
+		const deps = newsTestDeps(replies);
+		const original = deps.discordUpdateStore.dispatchLease;
+		deps.discordUpdateStore.dispatchLease = async (input) => {
+			const leased = await original(input);
+			if (leased.kind !== "leased") throw new Error("Invalid fixture");
+			return { kind: "recovery", record: leased.record };
+		};
+		let acked = false;
+		await processDiscordQueueMessage(
+			{
+				body: newsTestJob(),
+				attempts: 1,
+				ack: () => {
+					acked = true;
+				},
+				retry: () => {
+					throw new Error("must not retry queue");
+				},
+			},
+			deps,
+		);
+		expect(acked).toBe(true);
+		expect(String(replies[0]?.[2])).toContain("ไม่รัน AI ซ้ำ");
+	});
+
+	test("news reply recovery rebuilds the complete Markdown attachment without inference", async () => {
+		const replies: unknown[][] = [];
+		const deps = newsTestDeps(replies);
+		const store = deps.discordUpdateStore;
+		const originalLease = store.dispatchLease;
+		store.dispatchLease = async (input) => {
+			const leased = await originalLease(input);
+			if (leased.kind !== "leased")
+				throw new Error("Expected a leased fixture");
+			return {
+				kind: "duplicate",
+				record: {
+					...leased.record,
+					status: "replying",
+					replyContent:
+						"สรุปข่าว [1]\n\nแหล่งข่าว: https://news.google.com/rss/articles/example",
+				},
+			};
+		};
+		let acked = false;
+		await processDiscordQueueMessage(
+			{
+				body: newsTestJob(),
+				attempts: 2,
+				ack: () => {
+					acked = true;
+				},
+				retry: () => {
+					throw new Error("must not retry");
+				},
+			},
+			deps,
+		);
+		expect(acked).toBe(true);
+		expect(replies).toHaveLength(1);
+		const options = replies[0]?.[3] as {
+			attachment: { filename: string; data: string };
+		};
+		expect(options.attachment.filename).toBe("web-research-news-request.md");
+		expect(options.attachment.data).toContain(String(replies[0]?.[2]));
+	});
 	test("runs Hermes and edits the deferred interaction response", async () => {
 		const hermesInputs: unknown[] = [];
 		const replies: unknown[][] = [];
@@ -915,5 +1028,60 @@ function discordJob(): DiscordJob {
 		repository: "codemonday-dev/lms-backend",
 		branch: "dev",
 		question: "find the rate limit",
+	};
+}
+
+function newsTestJob(): DiscordJob {
+	return {
+		interactionId: "news-request",
+		interactionToken: "token",
+		applicationId: "app",
+		userId: "user",
+		channelId: "channel",
+		guildId: "guild",
+		action: "news",
+		text: "หาข่าวน้ำท่วม",
+		question: "หาข่าวน้ำท่วม",
+		providerSessionId: "discord:research:news-request",
+	};
+}
+
+function newsTestDeps(replies: unknown[][]): DiscordJobProcessorDeps {
+	return {
+		config: loadConfig({
+			AGENT_RUNTIME: "hermes",
+			HERMES_BASE_URL: "https://hermes.example",
+			HERMES_API_SERVER_KEY: "key",
+		}),
+		orchestrator: {
+			answer: async () => {
+				throw new Error("must not use general chat");
+			},
+		},
+		hermesClient: {
+			chat: async () => {
+				throw new Error("must not run inference");
+			},
+			listMessages: async () => [],
+			lastMessageMarker: async () => {
+				throw new Error("must not read code session");
+			},
+			clearSession: async () => undefined,
+		},
+		discordReplyClient: {
+			reply: async (...args) => {
+				replies.push(args);
+			},
+			replyToChannel: async () => undefined,
+			sendTyping: async () => undefined,
+		},
+		discordUpdateStore: createPassThroughTelegramUpdateStore(),
+		memoryStore: {
+			read: async () => {
+				throw new Error("must not read chat memory");
+			},
+			append: async (_sessionId, messages) => messages,
+			clear: async () => undefined,
+		},
 	};
 }

@@ -4,6 +4,9 @@ protocol: quic
 metrics: 127.0.0.1:20241
 ingress:
   - hostname: hermes.pakzartl.xyz
+    path: ^/ops(?:/.*)?$
+    service: http://127.0.0.1:8791
+  - hostname: hermes.pakzartl.xyz
     service: http://127.0.0.1:8642
   - hostname: capabilities.pakzartl.xyz
     service: http://127.0.0.1:8788

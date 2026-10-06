@@ -1,6 +1,7 @@
 import type { TelegramSessionCoordinator } from "./session-coordinator";
 
 export type TelegramSourceSelectionPhase =
+	| "intent"
 	| "repository"
 	| "branch"
 	| "custom_branch";
@@ -24,6 +25,7 @@ export type TelegramSourceSelectionKey = {
 };
 
 export type BeginTelegramSourceSelectionInput = {
+	phase?: "intent" | "repository";
 	providerSessionId: string;
 	userId: string;
 	question: string;
@@ -185,7 +187,7 @@ export function newSourceSelection(
 		userId: input.userId,
 		question: input.question,
 		...(input.messageId !== undefined ? { messageId: input.messageId } : {}),
-		phase: "repository",
+		phase: input.phase ?? "repository",
 		repositories: [...input.repositories],
 		branches: [],
 		expiresAt: new Date(Date.now() + 15 * 60_000).toISOString(),

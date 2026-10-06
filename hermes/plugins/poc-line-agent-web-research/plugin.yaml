@@ -1,0 +1,7 @@
+name: poc-line-agent-web-research
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: Bounded public web research tools for isolated Javis research sessions.
+license: MIT
+tags: [web, research, read-only, poc-line-agent]

@@ -2,7 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { discordCommands, registerDiscordCommands } from "./register-commands";
 
 const expectedCommands = [
+	"forcast",
 	"code",
+	"news",
 	"risk",
 	"db",
 	"artifact",

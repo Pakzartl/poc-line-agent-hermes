@@ -57,6 +57,7 @@ The bridge requests `Guilds`, `GuildMessages`, `DirectMessages`, and `MessageCon
 
 - Tunnel: `poc-line-agent-hermes-ovh` (`04f4553e-c475-424b-b0b6-22f4c4106400`).
 - Hostname: `https://hermes.pakzartl.xyz` -> `http://127.0.0.1:8642`.
+- Authenticated observability path: `https://hermes.pakzartl.xyz/ops/` -> `http://127.0.0.1:8791`. Keep this path-specific rule before the general Hermes hostname rule.
 - Capability hostname: `https://capabilities.pakzartl.xyz` -> `http://127.0.0.1:8788`.
 - Deploy executor hostname: `https://deploy.pakzartl.xyz` -> `http://127.0.0.1:8790`.
 - Optional DB capability hostname: `https://db-capabilities.pakzartl.xyz` -> `http://127.0.0.1:8789`, enabled only after `DB_ADAPTER_*` points at a read-only datasource.
@@ -67,7 +68,7 @@ The bridge requests `Guilds`, `GuildMessages`, `DirectMessages`, and `MessageCon
 - Keep the DB adapter disabled unless a read-only PostgreSQL datasource is approved. Its `/db/query` route requires bearer auth, validates datasource alias, Worker fingerprint, request limits, SQL read-only shape, and parameter safety, then runs through `psql` inside a read-only transaction.
 - Keep the deploy executor bound to loopback and its bearer token synchronized with the Worker's `DEPLOY_EXECUTOR_TOKEN`. It accepts only `DEPLOY_PLAN_V1`, an allowlisted repository, an immutable SHA, and the matching idempotency key. It never accepts arbitrary commands and never auto-rolls back.
 - Require `API_SERVER_KEY` bearer auth on every Worker-to-Hermes call.
-- Do not expose the dashboard publicly unless an auth provider is configured.
+- The OVH observability dashboard uses HTTP Basic authentication over the Cloudflare Tunnel. Its random password lives only in the local macOS Keychain (`poc-line-agent-ovh-observability-password`, account `pok.vip.08@gmail.com`) and root-only `/srv/hermes/observability/dashboard.env`. The unprivileged web process reads a bounded snapshot; only the root timer can inspect Docker and journald. Logs are allowlisted, redacted, capped at 120 lines per source, and never expose the Docker socket to HTTP.
 
 ## Secret Injection
 
@@ -98,9 +99,10 @@ Production and smoke configs pin `platform_toolsets.api_server` to only:
 
 - `poc_line_agent_github`
 - `poc_line_agent_skills_read`
+- `poc_line_agent_web_research`
 - `no_mcp`
 
-`known_plugin_toolsets.api_server` records the two plugin toolsets so Hermes does not silently drop them, and `agent.disabled_toolsets` explicitly disables risky defaults including terminal, file, browser, web/search, memory/session search, code execution, delegation, cron, connectors, computer use, image/video/TTS generation, x_search, homeassistant, kanban, Discord/admin, Feishu doc/drive, Spotify, Yuanbao, and stock `skills`.
+`known_plugin_toolsets.api_server` records the three plugin toolsets so Hermes does not silently drop them, and `agent.disabled_toolsets` explicitly disables risky defaults including terminal, file, browser, stock web/search, memory/session search, code execution, delegation, cron, connectors, computer use, image/video/TTS generation, x_search, homeassistant, kanban, Discord/admin, Feishu doc/drive, Spotify, Yuanbao, and stock `skills`.
 
 `tools.tool_search.enabled: off` is intentional. In pinned Hermes v0.21.5, plugin tools are otherwise replaced in the model request by `tool_search`, `tool_describe`, and `tool_call`; the smoke must fail if those bridge tools, stock `skill_manage`/`skill_view`/`skills_list`, MCP, browser, web, memory, terminal/shell, file write, or other mutation-capable tools appear in the model-facing schema.
 
@@ -108,10 +110,13 @@ The approved model-facing tools are exactly:
 
 - Scope-bound GitHub read tools: `search_code(query)`, `read_file(path)`
 - Mounted skill read tools: `list_repo_skills`, `read_repo_skill`
+- Scope-bound public research tools: `search_public_web(query, limit)`, `read_public_web(urls)`
 
 Normal Telegram messages are general Hermes chat and carry no source scope. `/code <question>` creates an independent short-lived selection flow in the existing per-chat Durable Object, lists every repository the configured GitHub token can read, fetches the selected repository's live branches, and sends the selected repository and branch in the canonical scope envelope. Multiple `/code` pickers can remain active in the same chat without replacing one another. The legacy `repo:` / `branch:` header format remains supported. The plugin captures scope per `session_id` and `turn_id`, clears invalid or missing scope for that turn, and injects scope into `search_code` and `read_file` with a `pre_tool_call` hook. The model-facing schemas contain no repository or branch fields, and broad `list_repositories`, `github_get`, and `get_commit` tools are absent.
 
 The `poc_line_agent_skills_read` plugin reads only direct child `SKILL.md` files under `POC_LINE_AGENT_SKILLS_DIR`, rejects traversal and symlink escapes, bounds output, and never writes. Use it for runtime skill discovery instead of the stock Hermes `skills` toolset.
+
+The `poc_line_agent_web_research` plugin is visible to the model but fails closed unless the Worker-created session id and first-line scope envelope both match `discord:research:<requestId>` for the current turn. It permits at most four searches and three page reads per turn. `read_public_web` accepts only public HTTPS URLs returned by `search_public_web` in that same turn; Hermes' built-in extraction layer independently blocks credentials and private/internal network targets. Do not enable the stock `web`, `search`, or `browser` toolsets as a shortcut.
 
 ## Sessions API Spike
 
@@ -126,7 +131,7 @@ Before routing real traffic, run the credential-free local spike against a deter
 
 The spike sends two provider-qualified session IDs, `telegram:chat:1001` and `line:user:u-1001`, through `POST /api/sessions/{id}/chat`, verifies `GET /api/sessions/{id}/messages` returns stable ordered `id`/timestamp, `role`, and `content`, restarts the Hermes container while preserving the `hermes-smoke-data` volume, and verifies both histories remain persistent and isolated.
 
-Known pinned-runtime observability defect: Hermes Agent v0.21.5 currently returns HTTP 500 for `GET /v1/skills` with `_find_all_skills() got an unexpected keyword argument 'include_editorial'`. This endpoint is irrelevant to the production skill path because the stock `skills` toolset is deliberately disabled. The spike keeps the endpoint failure as a warning, not a blocker, only when the fake model proves the approved `poc_line_agent_skills_read` tools can list skills, read `repo-overview`, and complete with `runtime-skill-smoke-ok`. The spike also fails on any enabled toolset outside the approved plugin toolsets, or any model-facing tool outside the four approved read tools above.
+Known pinned-runtime observability defect: Hermes Agent v0.21.5 currently returns HTTP 500 for `GET /v1/skills` with `_find_all_skills() got an unexpected keyword argument 'include_editorial'`. This endpoint is irrelevant to the production skill path because the stock `skills` toolset is deliberately disabled. The spike keeps the endpoint failure as a warning, not a blocker, only when the fake model proves the approved `poc_line_agent_skills_read` tools can list skills, read `repo-overview`, and complete with `runtime-skill-smoke-ok`. The spike also fails on any enabled toolset outside the approved plugin toolsets, or any model-facing tool outside the approved read-only tools above.
 
 If the spike cannot prove retrieval, isolation, restart persistence, and ordering metadata, Telegram Hermes routing remains blocked.
 

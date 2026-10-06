@@ -3,33 +3,40 @@ import { createAgentOrchestrator } from "./agent/orchestrator";
 import type { SkillManager } from "./agent/skill-manager";
 import { createToolRunner } from "./agent/tool-runner";
 import {
-	createMemoryCapabilityJobStore,
 	type CapabilityJobStore,
+	createMemoryCapabilityJobStore,
 } from "./capabilities/job-store";
 import type { AppConfig } from "./config";
 import { createDatabaseReadClient, type DatabaseReadClient } from "./db/client";
 import {
-	parseDbSchemaCatalogJson,
 	type DatabasePlanningContext,
+	parseDbSchemaCatalogJson,
 } from "./db/nl-planner";
 import { defaultMaskColumns } from "./db/query-policy";
+import {
+	type DiscordGatewayMessage,
+	handleDiscordGatewayMessage,
+} from "./discord/gateway-webhook";
 import {
 	createInlineDiscordJobQueue,
 	type DiscordJobQueue,
 } from "./discord/job";
-import { handleDiscordGatewayMessage } from "./discord/gateway-webhook";
 import { createDiscordReplyClient } from "./discord/reply";
 import { handleDiscordInteraction } from "./discord/webhook";
 import { handleQueueFailureEvent } from "./events/queue-failure-handler";
+import type { HermesClient } from "./hermes/client";
+import {
+	classifyIntent,
+	type IntentRouterDecision,
+} from "./intent-router/client";
 import { createLineReplyClient } from "./line/reply";
 import { handleLineWebhook } from "./line/webhook";
-import type { HermesClient } from "./hermes/client";
 import type { SessionMemoryStore } from "./memory/types";
+import { createTelegramCodeSourceClient } from "./telegram/code-source";
 import {
 	createInlineTelegramJobQueue,
 	type TelegramJobQueue,
 } from "./telegram/job";
-import { createTelegramCodeSourceClient } from "./telegram/code-source";
 import { createTelegramReplyClient } from "./telegram/reply";
 import {
 	createMemoryTelegramSourceSelectionStore,
@@ -48,6 +55,8 @@ import {
 } from "./whatsapp/webhook";
 
 export type AppDeps = {
+	classifyIntent?: (text: string) => Promise<IntentRouterDecision>;
+	discordIntentQueue?: { send(message: DiscordGatewayMessage): Promise<void> };
 	config: AppConfig;
 	orchestrator: ReturnType<typeof createAgentOrchestrator>;
 	lineReplyClient: ReturnType<typeof createLineReplyClient>;
@@ -70,6 +79,7 @@ export type AppDeps = {
 };
 
 export type AppDepsOptions = {
+	discordIntentQueue?: { send(message: DiscordGatewayMessage): Promise<void> };
 	fetch?: typeof fetch;
 	memoryStore: SessionMemoryStore;
 	skillManager: SkillManager;
@@ -173,7 +183,17 @@ export function createAppDeps(
 		databaseCatalog && databasePolicy
 			? { catalog: databaseCatalog, policy: databasePolicy }
 			: undefined;
+	const routerConfig = config.intentRouter;
 	const baseDeps = {
+		...(routerConfig?.enabled
+			? {
+					classifyIntent: (text: string) =>
+						classifyIntent(text, routerConfig, fetchImpl),
+				}
+			: {}),
+		...(options.discordIntentQueue
+			? { discordIntentQueue: options.discordIntentQueue }
+			: {}),
 		config,
 		fetch: fetchImpl,
 		orchestrator,

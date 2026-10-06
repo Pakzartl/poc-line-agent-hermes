@@ -46,21 +46,26 @@ def test_configs_pin_api_server_toolsets_and_disable_risky_defaults():
         assert cfg["plugins"]["enabled"] == [
             "poc-line-agent-github",
             "poc-line-agent-skills-read",
+            "poc-line-agent-web-research",
         ]
         assert cfg["platform_toolsets"]["api_server"] == [
             "poc_line_agent_github",
             "poc_line_agent_skills_read",
+            "poc_line_agent_web_research",
             "no_mcp",
         ]
         assert cfg["known_plugin_toolsets"]["api_server"] == [
             "poc_line_agent_github",
             "poc_line_agent_skills_read",
+            "poc_line_agent_web_research",
         ]
         assert REQUIRED_DISABLED.issubset(set(cfg["agent"]["disabled_toolsets"]))
         guardrail = cfg["agent"]["system_prompt"]
         assert "latest user turn" in guardrail
         assert "bound by the runtime" in guardrail
         assert "Never infer, reuse, select, or override" in guardrail
+        assert "isolated discord:research session" in guardrail
+        assert "Never use search_public_web or read_public_web" in guardrail
         assert cfg["tools"]["tool_search"]["enabled"] in (False, "off")
 
 

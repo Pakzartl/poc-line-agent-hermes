@@ -177,6 +177,136 @@ describe("config validation", () => {
 		).toThrow("AGENT_RUNTIME must be one of: legacy, hermes, fallback");
 	});
 
+	test("keeps the intent router disabled by default without requiring credentials", () => {
+		const config = loadConfig(validEnv);
+
+		expect(config.intentRouter).toMatchObject({
+			enabled: false,
+			protocol: "systemone",
+			endpointUrl: "",
+			cfAccessClientId: "",
+			cfAccessClientSecret: "",
+			timeoutMs: 45_000,
+			minProbability: 0.75,
+			minMargin: 0.2,
+		});
+		expect(() => validateConfig(config)).not.toThrow();
+	});
+
+	test("accepts a complete enabled System One intent router configuration", () => {
+		const config = loadConfig({
+			...validEnv,
+			INTENT_ROUTER_ENABLED: "true",
+			INTENT_ROUTER_PROTOCOL: "systemone",
+			INTENT_ROUTER_ENDPOINT_URL:
+				"https://router.example.com/base/v1/systemone",
+			INTENT_ROUTER_CF_ACCESS_CLIENT_ID: "access-client-id",
+			INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET: "access-client-secret",
+			INTENT_ROUTER_TIMEOUT_MS: "45000",
+			INTENT_ROUTER_MIN_PROBABILITY: "0.80",
+			INTENT_ROUTER_MIN_MARGIN: "0.25",
+		});
+
+		expect(config.intentRouter).toMatchObject({
+			enabled: true,
+			protocol: "systemone",
+			endpointUrl: "https://router.example.com/base/v1/systemone",
+			timeoutMs: 45_000,
+			minProbability: 0.8,
+			minMargin: 0.25,
+		});
+		expect(() => validateConfig(config)).not.toThrow();
+	});
+
+	test("rejects malformed intent router flags and unsupported protocols in loadConfig", () => {
+		expect(() =>
+			loadConfig({ ...validEnv, INTENT_ROUTER_ENABLED: "yes" }),
+		).toThrow("INTENT_ROUTER_ENABLED must be true or false");
+		expect(() =>
+			loadConfig({ ...validEnv, INTENT_ROUTER_PROTOCOL: "openai" }),
+		).toThrow("INTENT_ROUTER_PROTOCOL must be systemone");
+	});
+
+	test("requires intent router endpoint and Cloudflare Access secrets when enabled", () => {
+		const enabledEnv = {
+			...validEnv,
+			INTENT_ROUTER_ENABLED: "true",
+			INTENT_ROUTER_PROTOCOL: "systemone",
+			INTENT_ROUTER_ENDPOINT_URL:
+				"https://router.example.com/base/v1/systemone",
+			INTENT_ROUTER_CF_ACCESS_CLIENT_ID: "access-client-id",
+			INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET: "access-client-secret",
+		};
+
+		expect(() =>
+			validateConfig(
+				loadConfig({ ...enabledEnv, INTENT_ROUTER_ENDPOINT_URL: "" }),
+			),
+		).toThrow("INTENT_ROUTER_ENDPOINT_URL must be a valid URL");
+		expect(() =>
+			validateConfig(
+				loadConfig({
+					...enabledEnv,
+					INTENT_ROUTER_CF_ACCESS_CLIENT_ID: "",
+				}),
+			),
+		).toThrow("INTENT_ROUTER_CF_ACCESS_CLIENT_ID is required");
+		expect(() =>
+			validateConfig(
+				loadConfig({
+					...enabledEnv,
+					INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET: "",
+				}),
+			),
+		).toThrow("INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET is required");
+	});
+
+	test("rejects unsafe intent router endpoints and invalid thresholds", () => {
+		const enabledEnv = {
+			...validEnv,
+			INTENT_ROUTER_ENABLED: "true",
+			INTENT_ROUTER_PROTOCOL: "systemone",
+			INTENT_ROUTER_ENDPOINT_URL:
+				"https://router.example.com/base/v1/systemone",
+			INTENT_ROUTER_CF_ACCESS_CLIENT_ID: "access-client-id",
+			INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET: "access-client-secret",
+		};
+
+		for (const endpoint of [
+			"http://router.example.com/base/v1/systemone",
+			"https://user:pass@router.example.com/base/v1/systemone",
+			"https://router.example.com/base/v1/systemone?key=value",
+			"https://router.example.com/base/v1/systemone#fragment",
+		]) {
+			expect(() =>
+				validateConfig(
+					loadConfig({ ...enabledEnv, INTENT_ROUTER_ENDPOINT_URL: endpoint }),
+				),
+			).toThrow(
+				"INTENT_ROUTER_ENDPOINT_URL must be a credential-free HTTPS URL without query or hash",
+			);
+		}
+		expect(() =>
+			validateConfig(
+				loadConfig({ ...enabledEnv, INTENT_ROUTER_TIMEOUT_MS: "45001" }),
+			),
+		).toThrow(
+			"INTENT_ROUTER_TIMEOUT_MS must be an integer between 1 and 45000",
+		);
+		expect(() =>
+			validateConfig(
+				loadConfig({ ...enabledEnv, INTENT_ROUTER_MIN_PROBABILITY: "0.49" }),
+			),
+		).toThrow(
+			"INTENT_ROUTER_MIN_PROBABILITY must be a number between 0.5 and 1",
+		);
+		expect(() =>
+			validateConfig(
+				loadConfig({ ...enabledEnv, INTENT_ROUTER_MIN_MARGIN: "1.1" }),
+			),
+		).toThrow("INTENT_ROUTER_MIN_MARGIN must be a number between 0 and 1");
+	});
+
 	test("requires Hermes settings only when Hermes routing is enabled", () => {
 		expect(() => validateConfig(loadConfig(validEnv))).not.toThrow();
 		expect(() =>

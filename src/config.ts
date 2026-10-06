@@ -1,4 +1,5 @@
 import { parseDbSchemaCatalogJson } from "./db/nl-planner";
+import type { IntentRouterConfig } from "./intent-router/client";
 
 export type AppConfig = {
 	port: number;
@@ -71,6 +72,9 @@ export type AppConfig = {
 		artifactScreenshotTargetsJson: string;
 		deployTargetsJson: string;
 		deployExecutorToken: string;
+	};
+	intentRouter?: IntentRouterConfig & {
+		protocol: "systemone";
 	};
 };
 
@@ -166,6 +170,16 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
 			artifactScreenshotTargetsJson: env.ARTIFACT_SCREENSHOT_TARGETS_JSON ?? "",
 			deployTargetsJson: env.DEPLOY_TARGETS_JSON ?? "",
 			deployExecutorToken: env.DEPLOY_EXECUTOR_TOKEN ?? "",
+		},
+		intentRouter: {
+			enabled: parseStrictBoolean(env.INTENT_ROUTER_ENABLED, false),
+			protocol: parseIntentRouterProtocol(env.INTENT_ROUTER_PROTOCOL),
+			endpointUrl: env.INTENT_ROUTER_ENDPOINT_URL ?? "",
+			cfAccessClientId: env.INTENT_ROUTER_CF_ACCESS_CLIENT_ID ?? "",
+			cfAccessClientSecret: env.INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET ?? "",
+			timeoutMs: Number(env.INTENT_ROUTER_TIMEOUT_MS ?? "45000"),
+			minProbability: Number(env.INTENT_ROUTER_MIN_PROBABILITY ?? "0.75"),
+			minMargin: Number(env.INTENT_ROUTER_MIN_MARGIN ?? "0.20"),
 		},
 	};
 }
@@ -335,6 +349,7 @@ export function validateConfig(config: AppConfig): void {
 		);
 	}
 	validateOptionalCapabilityConfig(config);
+	validateIntentRouterConfig(config);
 
 	if (
 		!Number.isInteger(config.port) ||
@@ -405,6 +420,66 @@ export function validateConfig(config: AppConfig): void {
 		} catch {
 			throw new Error(`${name} must be a valid URL`);
 		}
+	}
+}
+
+function validateIntentRouterConfig(config: AppConfig): void {
+	const intentRouter = config.intentRouter;
+	if (!intentRouter?.enabled) return;
+
+	if (intentRouter.protocol !== "systemone") {
+		throw new Error("INTENT_ROUTER_PROTOCOL must be systemone");
+	}
+	if (!intentRouter.cfAccessClientId.trim()) {
+		throw new Error("INTENT_ROUTER_CF_ACCESS_CLIENT_ID is required");
+	}
+	if (!intentRouter.cfAccessClientSecret.trim()) {
+		throw new Error("INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET is required");
+	}
+	if (
+		!Number.isInteger(intentRouter.timeoutMs) ||
+		intentRouter.timeoutMs < 1 ||
+		intentRouter.timeoutMs > 45_000
+	) {
+		throw new Error(
+			"INTENT_ROUTER_TIMEOUT_MS must be an integer between 1 and 45000",
+		);
+	}
+	if (
+		!Number.isFinite(intentRouter.minProbability) ||
+		intentRouter.minProbability < 0.5 ||
+		intentRouter.minProbability > 1
+	) {
+		throw new Error(
+			"INTENT_ROUTER_MIN_PROBABILITY must be a number between 0.5 and 1",
+		);
+	}
+	if (
+		!Number.isFinite(intentRouter.minMargin) ||
+		intentRouter.minMargin < 0 ||
+		intentRouter.minMargin > 1
+	) {
+		throw new Error(
+			"INTENT_ROUTER_MIN_MARGIN must be a number between 0 and 1",
+		);
+	}
+
+	let endpoint: URL;
+	try {
+		endpoint = new URL(intentRouter.endpointUrl);
+	} catch {
+		throw new Error("INTENT_ROUTER_ENDPOINT_URL must be a valid URL");
+	}
+	if (
+		endpoint.protocol !== "https:" ||
+		endpoint.username ||
+		endpoint.password ||
+		endpoint.search ||
+		endpoint.hash
+	) {
+		throw new Error(
+			"INTENT_ROUTER_ENDPOINT_URL must be a credential-free HTTPS URL without query or hash",
+		);
 	}
 }
 
@@ -496,6 +571,29 @@ function parseRuntimeMode(value: string | undefined): AgentRuntimeMode {
 		return value;
 	}
 	throw new Error("AGENT_RUNTIME must be one of: legacy, hermes, fallback");
+}
+
+function parseStrictBoolean(
+	value: string | undefined,
+	defaultValue: boolean,
+): boolean {
+	if (value === undefined || value === "") {
+		return defaultValue;
+	}
+	if (value === "true") {
+		return true;
+	}
+	if (value === "false") {
+		return false;
+	}
+	throw new Error("INTENT_ROUTER_ENABLED must be true or false");
+}
+
+function parseIntentRouterProtocol(value: string | undefined): "systemone" {
+	if (!value || value === "systemone") {
+		return "systemone";
+	}
+	throw new Error("INTENT_ROUTER_PROTOCOL must be systemone");
 }
 
 function parseList(value: string | undefined): string[] {

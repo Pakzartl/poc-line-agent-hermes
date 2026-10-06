@@ -2,8 +2,8 @@ import { describe, expect, test } from "bun:test";
 import { createMemoryCapabilityJobStore } from "../capabilities/job-store";
 import { loadConfig } from "../config";
 import {
-	planNaturalLanguageDatabaseQuery,
 	type DatabasePlanningContext,
+	planNaturalLanguageDatabaseQuery,
 } from "../db/nl-planner";
 import { createDeployPlan } from "../deploy/plan";
 import { createPassThroughTelegramUpdateStore } from "../telegram/update-store";
@@ -11,6 +11,61 @@ import type { DiscordJob } from "./job";
 import { type DiscordWebhookDeps, handleDiscordInteraction } from "./webhook";
 
 describe("Discord interactions webhook", () => {
+	test("defers /news with an isolated session and without a repository", async () => {
+		const jobs: DiscordJob[] = [];
+		const fixture = await discordFixture({
+			id: "news-interaction",
+			application_id: "123",
+			token: "token",
+			type: 2,
+			channel_id: "channel",
+			guild_id: "6001",
+			member: { user: { id: "9001" } },
+			data: {
+				name: "news",
+				options: [{ name: "question", value: "หาข่าวน้ำท่วมอยุธยา (06/10/2026)" }],
+			},
+		});
+		const response = await handleDiscordInteraction(
+			fixture.request,
+			deps(fixture.publicKey, jobs),
+		);
+		expect((await response.json()) as unknown).toEqual({
+			type: 5,
+			data: { flags: 64 },
+		});
+		expect(jobs).toHaveLength(1);
+		expect(jobs[0]).toMatchObject({
+			action: "news",
+			providerSessionId: "discord:research:news-interaction",
+			question: "หาข่าวน้ำท่วมอยุธยา (06/10/2026)",
+		});
+		expect(jobs[0]?.repository).toBeUndefined();
+	});
+
+	test.each([
+		"",
+		"x".repeat(4001),
+	])("rejects invalid news question length", async (question) => {
+		const jobs: DiscordJob[] = [];
+		const fixture = await discordFixture({
+			id: "news-invalid",
+			application_id: "123",
+			token: "token",
+			type: 2,
+			guild_id: "6001",
+			member: { user: { id: "9001" } },
+			data: { name: "news", options: [{ name: "question", value: question }] },
+		});
+		const response = await handleDiscordInteraction(
+			fixture.request,
+			deps(fixture.publicKey, jobs),
+		);
+		expect(
+			((await response.json()) as { data: { content: string } }).data.content,
+		).toContain("1–4000");
+		expect(jobs).toHaveLength(0);
+	});
 	test("answers a signed Discord ping", async () => {
 		const fixture = await discordFixture({
 			id: "ping",
@@ -225,7 +280,12 @@ describe("Discord interactions webhook", () => {
 		});
 	});
 
-	test("queues a screenshot for the explicit public HTTPS URL", async () => {
+	test.each([
+		["https://example.com/docs", "https://example.com/docs"],
+		["de.aipass.net", "https://de.aipass.net/"],
+		["de.aipass.net/docs?view=full", "https://de.aipass.net/docs?view=full"],
+		["de.aipass.net:8443/docs", "https://de.aipass.net:8443/docs"],
+	])("queues a screenshot and normalizes the URL %s", async (url, normalized) => {
 		const jobs: DiscordJob[] = [];
 		const fixture = await discordFixture({
 			id: "artifact-url",
@@ -239,7 +299,7 @@ describe("Discord interactions webhook", () => {
 				options: [
 					{ name: "kind", value: "screenshot" },
 					{ name: "request", value: "capture the documentation" },
-					{ name: "url", value: "https://example.com/docs" },
+					{ name: "url", value: url },
 				],
 			},
 		});
@@ -253,12 +313,29 @@ describe("Discord interactions webhook", () => {
 			kind: "artifact_request",
 			artifactKind: "screenshot",
 			request: "capture the documentation",
-			url: "https://example.com/docs",
+			url: normalized,
 		});
+		expect(jobs[0]?.text).toContain(`url: ${normalized}`);
 	});
 
 	test("rejects unsafe or ambiguous screenshot targets", async () => {
 		for (const options of [
+			...[
+				"127.0.0.1/admin",
+				"10.0.0.1/admin",
+				"service.internal/admin",
+				"localhost",
+				"http://de.aipass.net",
+				"https://user:password@de.aipass.net",
+				"user:password@de.aipass.net",
+				"javascript:alert(1)",
+				"//de.aipass.net",
+				"/docs",
+			].map((url) => [
+				{ name: "kind", value: "screenshot" },
+				{ name: "request", value: "capture page" },
+				{ name: "url", value: url },
+			]),
 			[
 				{ name: "kind", value: "screenshot" },
 				{ name: "request", value: "capture private page" },

@@ -28,9 +28,54 @@ const questionOption = {
 
 export const discordCommands = [
 	{
+		name: "forcast",
+		description:
+			"Experimental radar rain nowcast for explicit coordinates (next 30 minutes)",
+		options: [
+			{
+				type: stringOptionType,
+				name: "message",
+				description:
+					"Rain question with lat,lng or a full Google Maps coordinate link",
+				required: true,
+				min_length: 1,
+				max_length: 4_000,
+			},
+			{
+				type: 10,
+				name: "latitude",
+				description:
+					"Target latitude; must provide longitude too (Discord has no GPS)",
+				required: false,
+				min_value: -85,
+				max_value: 85,
+			},
+			{
+				type: 10,
+				name: "longitude",
+				description: "Target longitude; must provide latitude too",
+				required: false,
+				min_value: -180,
+				max_value: 180,
+			},
+		],
+	},
+	{
 		name: "code",
 		description: "Inspect a GitHub repository and branch with Hermes",
 		options: [repositoryOption, branchOption, questionOption],
+	},
+	{
+		name: "news",
+		description:
+			"Research current public web information and summarize with sources",
+		options: [
+			{
+				...questionOption,
+				description:
+					"Question, topic, location, and optional date or time range",
+			},
+		],
 	},
 	{
 		name: "risk",

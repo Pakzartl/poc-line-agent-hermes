@@ -31,8 +31,10 @@ import {
 	type HermesClient,
 } from "../hermes/client";
 import type { SessionMemoryStore } from "../memory/types";
+import { NewsRequestError, runNewsRequest } from "../news/service";
 import { formatHermesSourceInput } from "../telegram/source-scope";
 import type { TelegramUpdateStore } from "../telegram/update-store";
+import { forecastRadar } from "../weather/radar";
 import {
 	DiscordApiError,
 	type DiscordReplyAttachment,
@@ -57,6 +59,8 @@ export type DiscordJob = {
 	sourceMessageId?: string;
 	progressMessageId?: string;
 	action:
+		| "news"
+		| "forecast"
 		| "chat"
 		| "clear"
 		| "status"
@@ -107,6 +111,7 @@ type DiscordQueueMessage = {
 
 type DiscordJobAnswer = {
 	text: string;
+	terminalFailureReason?: string;
 	attachment?: DiscordReplyAttachment;
 	capabilityStatus?: "completed" | "failed";
 };
@@ -117,13 +122,18 @@ const genericFailureMessage =
 	"The agent could not complete this request. Please try again.";
 
 class DiscordManualInterventionError extends Error {
-	readonly retryable = true;
+	readonly retryable: boolean;
 	readonly userMessage: string;
 
-	constructor(message: string, userMessage = genericFailureMessage) {
+	constructor(
+		message: string,
+		userMessage = genericFailureMessage,
+		retryable = true,
+	) {
 		super(message);
 		this.name = "DiscordManualInterventionError";
 		this.userMessage = userMessage;
+		this.retryable = retryable;
 	}
 }
 
@@ -230,7 +240,7 @@ async function processDiscordJob(
 	const sessionId = discordSessionId(job);
 	const route = selectDiscordRuntime(deps);
 	const baseline =
-		route === "hermes"
+		route === "hermes" && job.action === "chat"
 			? await deps.hermesClient?.lastMessageMarker(sessionId)
 			: undefined;
 	const lease = await deps.discordUpdateStore.dispatchLease({
@@ -258,6 +268,14 @@ async function processDiscordJob(
 		await recoverHermesAnswer(job, deps, lease.record);
 		return "processed";
 	}
+	if (lease.kind === "recovery" && job.action === "news") {
+		// Never repeat uncertain inference after a Worker interruption.
+		throw new DiscordManualInterventionError(
+			"News execution was interrupted; automatic inference retry suppressed",
+			"งานค้นข่าวก่อนหน้าถูกขัดจังหวะครับ จึงไม่รัน AI ซ้ำอัตโนมัติ กรุณาส่ง /news ใหม่",
+			false,
+		);
+	}
 	if (await isCapabilityJobCancelled(job, deps)) {
 		await terminalUpdate(job, deps.discordUpdateStore, "complete", {
 			terminalReason: "Capability job cancelled before execution",
@@ -276,7 +294,7 @@ async function processDiscordJob(
 
 	const stopTyping = await startTypingHeartbeat(job, deps.discordReplyClient);
 	try {
-		const answer =
+		const answer: DiscordJobAnswer =
 			job.action === "clear"
 				? { text: await clearConversation(deps, sessionId, route) }
 				: await answerQuestion(job, deps, sessionId, route);
@@ -296,9 +314,17 @@ async function processDiscordJob(
 			answer.attachment,
 		);
 		await sendReply(job, deps, responseText, replyOptions);
-		await terminalUpdate(job, deps.discordUpdateStore, "complete", {
-			replyContentHash: await hashCanonicalInput(responseText),
-		});
+		await terminalUpdate(
+			job,
+			deps.discordUpdateStore,
+			answer.terminalFailureReason ? "fail" : "complete",
+			{
+				replyContentHash: await hashCanonicalInput(responseText),
+				...(answer.terminalFailureReason
+					? { terminalReason: answer.terminalFailureReason }
+					: {}),
+			},
+		);
 		if (job.capability && deps.capabilityJobStore && !isApprovalRequest(job)) {
 			await deps.capabilityJobStore.transitionJob({
 				jobId: capabilityJobId(job),
@@ -322,6 +348,56 @@ async function answerQuestion(
 	sessionId: string,
 	route: "legacy" | "hermes",
 ): Promise<DiscordJobAnswer> {
+	if (job.action === "news") {
+		if (!deps.hermesClient) {
+			return {
+				text: "ค้นข้อมูลจากเว็บยังไม่ได้ครับ เพราะ Hermes ไม่พร้อมใช้งาน",
+				terminalFailureReason: "news-hermes-unavailable",
+			};
+		}
+		try {
+			return await runNewsRequest({
+				question: job.question ?? job.text,
+				requestId: job.interactionId,
+				hermesClient: deps.hermesClient,
+			});
+		} catch (error) {
+			// Persist and deliver this terminal answer; do not retry paid inference.
+			const phase =
+				error instanceof NewsRequestError ? error.phase : "validation";
+			console.error(
+				JSON.stringify({
+					message: "discord news failed",
+					interactionId: job.interactionId,
+					phase,
+				}),
+			);
+			return {
+				text: "ค้นเว็บหรือสรุปข้อมูลไม่สำเร็จครับ จึงยังยืนยันสถานการณ์ไม่ได้ ลอง /news ใหม่ภายหลัง (ไม่สร้างข้อมูลขึ้นเองและไม่รัน AI ซ้ำอัตโนมัติ)",
+				terminalFailureReason: `news-${phase}-failed`,
+			};
+		}
+	}
+	if (job.action === "forecast") {
+		if (job.capability?.kind !== "radar_forecast")
+			throw new Error("Radar forecast payload is missing");
+		try {
+			const result = await forecastRadar(job.capability, { fetch: deps.fetch });
+			return {
+				text: result.text,
+				attachment: {
+					filename: `radar-nowcast-${job.interactionId}.json`,
+					contentType: "application/json;charset=utf-8",
+					data: `${JSON.stringify({ version: "radar-nowcast/v1", requestId: job.interactionId, question: job.capability.message, result: result.data }, null, 2)}\n`,
+				},
+			};
+		} catch {
+			return {
+				text: "ดึงหรือวิเคราะห์เรดาร์ไม่ได้ในขณะนี้ จึงยังยืนยันเวลาฝนไม่ได้ครับ ลองใหม่ภายหลัง (ไม่ได้ใช้ Open-Meteo หรือให้ AI เดาคำตอบแทน)",
+				capabilityStatus: "failed",
+			};
+		}
+	}
 	if (job.action === "deploy_execute") {
 		return executeDeploy(job, deps);
 	}
@@ -333,7 +409,7 @@ async function answerQuestion(
 			text: [
 				"Javis is online.",
 				`Runtime: ${route}`,
-				"Available Discord commands: /code, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, /clear",
+				"Available Discord commands: /forcast, /code, /news, /risk, /db, /artifact, /deploy, /status, /cancel, /skills, /clear",
 				"Safety: deploy is approval-gated; database requests do not execute live SQL unless a read-only DB tool is configured.",
 			].join("\n"),
 		};
@@ -957,7 +1033,9 @@ async function updateInteractionProgress(
 			job.interactionToken,
 			job.capability
 				? `กำลังทำงาน \`${capabilityName(job)}\`… Request ID: \`${capabilityJobId(job)}\``
-				: "กำลังประมวลผล…",
+				: job.action === "news"
+					? "กำลังค้นเว็บและสรุปข้อมูลพร้อมแหล่งอ้างอิง…"
+					: "กำลังประมวลผล…",
 		);
 	} catch (error) {
 		console.warn(
@@ -1088,6 +1166,13 @@ function buildDiscordArtifactAttachment(
 	job: DiscordJob,
 	answer: string,
 ): DiscordReplyAttachment | undefined {
+	if (job.action === "news") {
+		return {
+			filename: `web-research-${job.interactionId}.md`,
+			contentType: "text/markdown;charset=utf-8",
+			data: `# Web research\n\n${answer}\n`,
+		};
+	}
 	if (job.action !== "chat") {
 		return undefined;
 	}
@@ -1270,6 +1355,8 @@ function buildDiscordArtifactAttachment(
 
 function capabilityName(job: DiscordJob): string {
 	switch (job.capability?.kind) {
+		case "radar_forecast":
+			return "radar-nowcast";
 		case "code_investigation":
 			return "ask-code";
 		case "risk_assessment":

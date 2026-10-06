@@ -57,6 +57,12 @@ export type DiscordInteractionResponse = {
 
 export type DiscordCapabilityPayload =
 	| {
+			kind: "radar_forecast";
+			message: string;
+			latitude: number;
+			longitude: number;
+	  }
+	| {
 			kind: "code_investigation";
 			repository: string;
 			branch: string;

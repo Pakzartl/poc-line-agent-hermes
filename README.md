@@ -156,7 +156,7 @@ Durable Object, so it adds no Cloudflare resource.
 - `/code` investigates an explicit repository and branch and attaches a cited HIL artifact.
 - `/risk` inspects an implementation or deployment change and returns blast radius, side effects, a Human Test Plan, and a HIL artifact.
 - `/db` maps a Thai/English question or explicit `SELECT`/`WITH` query to an immutable read-only plan, shows the SQL and limits, and runs it only after the requesting user presses **Approve query**. Live planning and execution stay disabled unless the complete adapter, allowlist, and schema-catalog block is configured; mutations, comments, multi-statements, unsafe functions, non-allowlisted tables, oversized results, and unmasked PII fail closed.
-- `/artifact` creates a Markdown, JSON, CSV, diagram, or screenshot artifact. Text artifacts are generated through the existing model path and validated before attachment. Screenshots accept either a server-owned `target_id` preset or an explicit credential-free public HTTPS `url`, never both. The Worker validates the URL first; the OVH renderer validates DNS again, rejects private/local addresses, pins the resolved public address, and blocks navigation to other hosts. Production includes the no-cost OVH companion renderer and a `javis-health` demo target.
+- `/artifact` creates a Markdown, JSON, CSV, diagram, or screenshot artifact. Text artifacts are generated through the existing model path and validated before attachment. Screenshots accept either a server-owned `target_id` preset or an explicit credential-free public HTTPS `url`, never both. Bare domains such as `de.aipass.net` are expanded to `https://de.aipass.net/`; explicitly supplied HTTP URLs are rejected. The Worker validates the URL first; the OVH renderer validates DNS again, rejects private/local addresses, pins the resolved public address, and blocks navigation to other hosts. Production includes the no-cost OVH companion renderer and a `javis-health` demo target.
 - `/deploy` accepts an allowlisted repository, immutable 40-character commit SHA, and autocomplete target. It creates a plan first, then requires the requesting user to press **Approve deploy** before the external executor is called. Approval is bound to user, guild, target, repository, SHA, expiry, and plan digest.
 - `/status request_id:<id>` reads the persisted capability lifecycle and latest audit entry.
 - `/skills` lists the demo and output artifact for every capability.
@@ -352,6 +352,68 @@ Defaults:
 - `HERMES_TELEGRAM_ALLOWED_USER_IDS` controls the Telegram Hermes canary only in `AGENT_RUNTIME=fallback`. In `AGENT_RUNTIME=hermes`, every allowed Telegram agent request routes to Hermes.
 - `SESSION_MEMORY_DIR` defaults to `.sessions`.
 - `SESSION_MEMORY_MAX_MESSAGES` defaults to `12` messages (six user/assistant turns).
+
+## Local LLM intent router
+
+The optional intent router classifies only fresh Discord bot mentions before a
+repo/branch flow exists. Slash commands and active selection flows bypass it.
+The fixed choices are `code`, `news`, `general`, and `clarify`: `code` starts
+the repository picker, `general` continues the existing Hermes general chat path,
+and low-confidence, offline, invalid, or explicit `clarify` results ask the user
+to choose manually by replying `1`/`code`, `2`/`news`, or `3`/`general`; the
+original question is retained. `news` and `/news question:...` use the same
+isolated Hermes public-web research path, without a repository picker.
+There is no paid-provider router fallback.
+
+### Hermes web research
+
+Use `/news question:ถ้าจะเดินทางไปน่านวันที่ 10/10/2026 มีความเสี่ยงน้ำท่วมไหม`
+or mention Javis with a public-information question. The Worker sends one turn to
+an isolated `discord:research:*` Hermes session. Hermes chooses bounded public-web
+searches, may read up to three URLs returned by those searches, and produces a
+summary with public HTTPS citations. This covers news, current situations,
+forecasts, warnings, schedules, and other time-sensitive research; it is not
+limited to RSS headlines or publication dates.
+
+The scoped plugin permits at most four searches and three page reads per turn.
+Page reads are restricted to URLs returned by search in that same turn, while
+Hermes still blocks credential-bearing and private-network targets. Stock web,
+browser, terminal, file, database, and deployment toolsets remain disabled.
+The current keyless Hermes provider requires no new secret or paid service, but
+has no application SLA and may rate-limit or fail; errors fail closed and
+uncertain inference is not automatically repeated. Research artifacts are rebuilt
+from persisted response text for delivery recovery and never share repository
+scope or general-chat memory.
+
+Production classifies on the existing Worker queue, acknowledging the Discord
+gateway immediately and renewing typing while the model runs. The classifier
+uses a separate deduplication scope so it cannot block Hermes conversation
+ordering. It does not grant deploy, database, or screenshot execution authority.
+
+These settings do not replace `OPENAI_*` or Hermes settings:
+
+```dotenv
+INTENT_ROUTER_ENABLED=false
+INTENT_ROUTER_PROTOCOL=systemone
+INTENT_ROUTER_ENDPOINT_URL=
+INTENT_ROUTER_CF_ACCESS_CLIENT_ID=
+INTENT_ROUTER_CF_ACCESS_CLIENT_SECRET=
+INTENT_ROUTER_TIMEOUT_MS=45000
+INTENT_ROUTER_MIN_PROBABILITY=0.75
+INTENT_ROUTER_MIN_MARGIN=0.20
+```
+
+The server uses the System One contract, not OpenAI chat completions: POST a
+`state` and a `questions` map with a `choice` question and explicit criteria,
+then read the selected choice and probabilities from `answers`. `ENDPOINT_URL`
+is the full credential-free HTTPS endpoint with no query or hash. Send the two
+Cloudflare Access credentials as `CF-Access-Client-Id` and
+`CF-Access-Client-Secret` headers, never in a URL. The endpoint selects its own
+model; do not send a model ID or reuse an OpenAI key. The 45-second timeout
+allows for documented cold starts. Put production credential values in Wrangler
+secrets or other environment secret storage, never in `wrangler.jsonc` or git.
+Do not send repository contents or other credentials to the classifier; it needs
+only the user's routing text.
 
 ## Skills
 

@@ -22,17 +22,20 @@ plugins:
   enabled:
     - poc-line-agent-github
     - poc-line-agent-skills-read
+    - poc-line-agent-web-research
 
 platform_toolsets:
   api_server:
     - poc_line_agent_github
     - poc_line_agent_skills_read
+    - poc_line_agent_web_research
     - no_mcp
 
 known_plugin_toolsets:
   api_server:
     - poc_line_agent_github
     - poc_line_agent_skills_read
+    - poc_line_agent_web_research
 
 agent:
   system_prompt: |
@@ -40,6 +43,8 @@ agent:
     Never infer, reuse, select, or override repository or branch from history, defaults, metadata, or tool output.
     The search_code and read_file tools automatically receive the bound source scope; provide only arguments declared by their schemas.
     If a tool reports that source scope is missing, tell the Telegram user to start the code request with /code and stop. General chat does not require source scope.
+    Public web research is allowed only when the runtime binds the latest turn to an isolated discord:research session.
+    Never use search_public_web or read_public_web in general-chat or repository sessions. In an authorized research session, cite the public HTTPS source URLs returned by the tools and state evidence gaps.
   disabled_toolsets:
     - terminal
     - file

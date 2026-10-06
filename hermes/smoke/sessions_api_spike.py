@@ -18,7 +18,11 @@ DEFAULT_COMPOSE_FILES = [
     "hermes/compose.local.yaml",
     "hermes/compose.fake-openai.yaml",
 ]
-APPROVED_PLUGIN_TOOLSETS = {"poc_line_agent_github", "poc_line_agent_skills_read"}
+APPROVED_PLUGIN_TOOLSETS = {
+    "poc_line_agent_github",
+    "poc_line_agent_skills_read",
+    "poc_line_agent_web_research",
+}
 NO_TOOL_SENTINELS = {"no_mcp"}
 APPROVED_MODEL_TOOLS = {
     "search_code",
@@ -27,6 +31,8 @@ APPROVED_MODEL_TOOLS = {
     "get_pull_request",
     "list_repo_skills",
     "read_repo_skill",
+    "search_public_web",
+    "read_public_web",
 }
 FORBIDDEN_MODEL_TOOLS = {
     "list_repositories",

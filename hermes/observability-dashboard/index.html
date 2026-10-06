@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="th">
+	<head>
+		<meta charset="utf-8" />
+		<meta name="viewport" content="width=device-width, initial-scale=1" />
+		<title>Javis OVH Observability</title>
+		<link rel="stylesheet" href="/ops/styles.css" />
+	</head>
+	<body>
+		<main>
+			<header>
+				<div>
+					<p class="eyebrow">JAVIS · OVH PRODUCTION</p>
+					<h1>Observability</h1>
+					<p id="subtitle">กำลังโหลดข้อมูลจาก server…</p>
+				</div>
+				<div id="freshness" class="pill neutral">connecting</div>
+			</header>
+			<section id="metrics" class="metric-grid" aria-label="System metrics"></section>
+			<section class="panel chart-panel">
+				<div class="panel-heading">
+					<div><p class="eyebrow">LAST 60 MINUTES</p><h2>CPU / Memory</h2></div>
+					<div class="legend"><span class="cpu-dot"></span>CPU <span class="memory-dot"></span>Memory</div>
+				</div>
+				<canvas id="history" height="180"></canvas>
+			</section>
+			<section class="panel">
+				<div class="panel-heading"><div><p class="eyebrow">RUNTIME</p><h2>Containers & Services</h2></div></div>
+				<div id="services" class="service-strip"></div>
+				<div class="table-wrap">
+					<table>
+						<thead><tr><th>Container</th><th>Status</th><th>CPU</th><th>Memory</th><th>Network I/O</th><th>Restarts</th></tr></thead>
+						<tbody id="containers"></tbody>
+					</table>
+				</div>
+			</section>
+			<section class="panel logs-panel">
+				<div class="panel-heading logs-heading">
+					<div><p class="eyebrow">REDACTED · LAST 30 MINUTES</p><h2>Operational logs</h2></div>
+					<select id="log-source" aria-label="Log source"></select>
+				</div>
+				<pre id="logs" tabindex="0">No logs loaded.</pre>
+			</section>
+		</main>
+		<script src="/ops/app.js" defer></script>
+	</body>
+</html>
