@@ -79,6 +79,13 @@ export function createSandboxMockHandler(
 
 		if (
 			request.method === "POST" &&
+			/^\/telegram\/bot[^/]+\/sendChatAction$/.test(url.pathname)
+		) {
+			return Response.json({ ok: true });
+		}
+
+		if (
+			request.method === "POST" &&
 			/^\/whatsapp\/v[^/]+\/[^/]+\/messages$/.test(url.pathname)
 		) {
 			options.state.whatsAppReplies.push(await request.json());
@@ -122,7 +129,7 @@ async function handleOpenAiResponses(
 					arguments: JSON.stringify({
 						repository: "sandbox/repo",
 						query: "login error",
-						ref: null,
+						branch: "main",
 					}),
 				},
 			],
@@ -140,7 +147,7 @@ async function handleOpenAiResponses(
 					arguments: JSON.stringify({
 						repository: "sandbox/repo",
 						path: "src/auth/login.ts",
-						ref: "main",
+						branch: "main",
 					}),
 				},
 			],

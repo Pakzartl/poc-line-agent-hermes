@@ -3,6 +3,21 @@ import { loadConfig } from "../config";
 import { createGitHubTools } from "./github";
 
 describe("GitHub tools", () => {
+	test("code-reading tools require an explicit user-selected branch", () => {
+		const tools = createGitHubTools({
+			config: loadConfig({ GITHUB_TOKEN: "secret-token" }).github,
+		});
+
+		for (const name of ["search_code", "read_file"]) {
+			const definition = tools.find(
+				(tool) => tool.definition.name === name,
+			)?.definition;
+			expect(definition?.parameters.required).toContain("branch");
+			expect(definition?.parameters.properties).toHaveProperty("branch");
+			expect(definition?.parameters.properties).not.toHaveProperty("ref");
+		}
+	});
+
 	test("lists repositories available to the token with bounded metadata", async () => {
 		let request: Request | undefined;
 		const tools = createGitHubTools({
@@ -44,7 +59,7 @@ describe("GitHub tools", () => {
 		});
 	});
 
-	test("search_code scans the configured branch archive without exposing the token", async () => {
+	test("search_code scans the user-selected branch archive without exposing the token", async () => {
 		const requestedHeaders: HeadersInit[] = [];
 		const requestedUrls: string[] = [];
 		const tools = createGitHubTools({
@@ -67,12 +82,14 @@ describe("GitHub tools", () => {
 
 		const result = await tools
 			.find((tool) => tool.definition.name === "search_code")
-			?.run('{"repository":"superset/repo","query":"Throttle|rate limit"}');
+			?.run(
+				'{"repository":"superset/repo","query":"Throttle|rate limit","branch":"chore/seed-pichya-user"}',
+			);
 
 		expect(result?.ok).toBe(true);
 		expect(result?.data).toMatchObject({
 			repository: "superset/repo",
-			ref: "dev",
+			ref: "chore/seed-pichya-user",
 			queries: ["Throttle", "rate limit"],
 			matchedFiles: 1,
 			files: [
@@ -82,10 +99,14 @@ describe("GitHub tools", () => {
 				},
 			],
 		});
-		expect(requestedUrls[0]).toContain("/repos/superset/repo/tarball/dev");
+		expect(requestedUrls[0]).toContain(
+			"/repos/superset/repo/tarball/chore%2Fseed-pichya-user",
+		);
 		const secondResult = await tools
 			.find((tool) => tool.definition.name === "search_code")
-			?.run('{"repository":"superset/repo","query":"export","ref":"dev"}');
+			?.run(
+				'{"repository":"superset/repo","query":"export","branch":"chore/seed-pichya-user"}',
+			);
 		expect(secondResult?.data).toMatchObject({ indexReused: true });
 		expect(requestedUrls).toHaveLength(1);
 		expect(JSON.stringify(result)).not.toContain("secret-token");
@@ -95,7 +116,7 @@ describe("GitHub tools", () => {
 		);
 	});
 
-	test("read_file reads from the configured ref", async () => {
+	test("read_file reads from the user-selected branch", async () => {
 		let requestedUrl = "";
 		const tools = createGitHubTools({
 			config: loadConfig({
@@ -115,10 +136,12 @@ describe("GitHub tools", () => {
 
 		const result = await tools
 			.find((tool) => tool.definition.name === "read_file")
-			?.run('{"repository":"superset/repo","path":"src/config.ts"}');
+			?.run(
+				'{"repository":"superset/repo","path":"src/config.ts","branch":"feature/arbitrary-branch"}',
+			);
 
-		expect(requestedUrl).toContain("?ref=dev");
-		expect(result?.data).toMatchObject({ ref: "dev" });
+		expect(requestedUrl).toContain("?ref=feature%2Farbitrary-branch");
+		expect(result?.data).toMatchObject({ ref: "feature/arbitrary-branch" });
 	});
 
 	test("blocks archive redirects outside the configured GitHub service", async () => {
@@ -134,8 +157,9 @@ describe("GitHub tools", () => {
 		await expect(
 			tools
 				.find((tool) => tool.definition.name === "search_code")
-				?.run('{"repository":"superset/repo","query":"login"}') ??
-				Promise.resolve(),
+				?.run(
+					'{"repository":"superset/repo","query":"login","branch":"dev"}',
+				) ?? Promise.resolve(),
 		).rejects.toThrow("GitHub archive redirect was not trusted");
 	});
 
@@ -157,7 +181,9 @@ describe("GitHub tools", () => {
 
 		const result = await tools
 			.find((tool) => tool.definition.name === "read_file")
-			?.run('{"repository":"superset/repo","path":"src/large.ts"}');
+			?.run(
+				'{"repository":"superset/repo","path":"src/large.ts","branch":"dev"}',
+			);
 
 		expect(result?.ok).toBe(true);
 		expect(JSON.stringify(result?.data).length).toBeLessThan(21_000);

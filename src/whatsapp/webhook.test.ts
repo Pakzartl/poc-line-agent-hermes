@@ -117,7 +117,7 @@ describe("WhatsApp webhook", () => {
 		expect(request?.headers.get("Authorization")).toBe(
 			"Bearer secret-access-token",
 		);
-		expect(await request?.json()).toEqual({
+		expect(await requestJson(request)).toEqual({
 			messaging_product: "whatsapp",
 			to: "66812345678",
 			type: "text",
@@ -126,6 +126,13 @@ describe("WhatsApp webhook", () => {
 		});
 	});
 });
+
+async function requestJson(request: Request | undefined): Promise<unknown> {
+	if (!request) {
+		throw new Error("Expected request to be captured");
+	}
+	return request.json();
+}
 
 function trackingMemoryStore(sessionIds: string[]): SessionMemoryStore {
 	return {

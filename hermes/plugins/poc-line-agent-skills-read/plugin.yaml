@@ -1,0 +1,8 @@
+name: poc-line-agent-skills-read
+version: 0.1.0
+manifest_version: 2
+api_version: 1
+description: Deterministic read-only access to mounted poc-line-agent Hermes skills.
+license: MIT
+tags: [skills, read-only, poc-line-agent]
+config_schema: {}

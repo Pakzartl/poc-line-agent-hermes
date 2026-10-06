@@ -1,0 +1,26 @@
+[Unit]
+Description=Poc Line Agent Hermes Deploy Executor
+After=network-online.target docker.service
+Wants=network-online.target docker.service
+
+[Service]
+Type=simple
+User=debian
+Group=docker
+WorkingDirectory=/srv/hermes/app/deploy-executor
+EnvironmentFile=/srv/hermes/app/env.local
+Environment=DOCKER_CONFIG=/tmp/javis-docker-config
+ExecStart=/usr/local/bin/bun run src/server.ts
+Restart=on-failure
+RestartSec=5
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/hermes/app /srv/hermes/backups /srv/hermes/deploy-executor
+CapabilityBoundingSet=
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+SystemCallArchitectures=native
+
+[Install]
+WantedBy=multi-user.target

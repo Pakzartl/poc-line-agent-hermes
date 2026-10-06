@@ -1,0 +1,15 @@
+services:
+  hermes-tests:
+    build:
+      context: ..
+      dockerfile: hermes/Dockerfile.test
+    image: poc-line-agent-hermes-tests
+    working_dir: /workspace
+    entrypoint: ["/opt/hermes/.venv/bin/python"]
+    command: ["-m", "pytest", "/workspace/hermes/tests", "-q", "-p", "no:cacheprovider"]
+    environment:
+      PYTHONPATH: /workspace/hermes/plugins/poc-line-agent-github:/workspace/hermes/tests
+      GITHUB_TOKEN: test-token
+      GITHUB_API_BASE_URL: https://api.github.com
+    volumes:
+      - ..:/workspace:ro

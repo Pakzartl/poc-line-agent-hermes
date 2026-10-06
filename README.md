@@ -1,10 +1,22 @@
 # Messaging Agent POC
 
-Bun/TypeScript proof of concept for an AI coding assistant on Telegram, WhatsApp, and LINE. It uses Markdown skills, OpenAI-compatible Responses API tool calling, read-only GitHub source tools, and optional local session memory.
+Bun/TypeScript proof of concept for an AI coding assistant on Telegram, Discord, WhatsApp, and LINE. The Cloudflare Worker remains the public webhook edge while a pinned NousResearch Hermes Agent runtime on the personal OVH VPS handles allowed Telegram and Discord agent traffic. LINE and WhatsApp continue to use the Worker legacy loop.
+
+## Current architecture
+
+- Cloudflare Worker owns provider webhooks, signature checks, Telegram/Discord allowlists, the shared agent queue/DLQ, routing, and rollback.
+- Production uses `AGENT_RUNTIME=hermes`; `legacy` remains the immediate rollback mode for the existing TypeScript agent loop.
+- `AGENT_RUNTIME=hermes` routes all allowed Telegram and Discord agent traffic to Hermes. LINE and WhatsApp remain on the Worker legacy loop, so their legacy OpenAI/GitHub secrets are still required when those providers are configured.
+- `AGENT_RUNTIME=fallback` is a routing/canary fallback only: Telegram users in `HERMES_TELEGRAM_ALLOWED_USER_IDS` use Hermes, other Telegram users plus LINE/WhatsApp use legacy. After a Hermes dispatch lease is acquired, the Worker does not execute the legacy agent for that update.
+- `TELEGRAM_SESSION_COORDINATOR` is the existing Durable Object authority for Telegram and Discord duplicate claims and dispatch leases. Its binding name is retained to avoid a migration; `SESSION_MEMORY` remains legacy memory/cache/audit.
+- Hermes runs as the pinned Docker image on the personal OVH VPS and listens only on `127.0.0.1:8642`. The outbound-only Cloudflare Tunnel publishes `https://hermes.pakzartl.xyz`; all non-health API calls require bearer authentication.
+- The Cloudflare Worker and Tunnel remain on free Cloudflare products. Do not enable Cloudflare Containers or add paid Cloudflare/OVH resources without explicit approval; the already-purchased OVH VPS is the only additional hosting cost.
 
 ## Channel recommendation
 
-**Telegram is the recommended default for internal developer assistants.** Its Bot API has a straightforward webhook secret and normal `sendMessage` calls without an expiring reply token.
+**Discord is the recommended company operating interface for this project.** It supports signed interactions, deferred replies, autocomplete, buttons, attachments, typing indicators, slash commands, and natural mention flows. The adapter keeps repository selection and long-running Hermes work on the existing Worker Queue and Durable Object, so it does not add a Cloudflare resource.
+
+Telegram remains a good lightweight fallback. Its Bot API has a straightforward webhook secret and normal `sendMessage` calls without an expiring reply token.
 
 WhatsApp is also supported and is usually a better fit than LINE when the intended users already work in WhatsApp. It requires Meta Business onboarding and is still subject to WhatsApp's customer-service window, template, and pricing rules.
 
@@ -19,10 +31,24 @@ bun run dev
 
 Configure at least one complete messaging provider block. Unused provider blocks must remain entirely blank.
 
+Local validation entrypoints:
+
+```sh
+bun run test:worker
+bun run test:adapter
+bun run test:hermes
+```
+
+Run them sequentially. `test:worker` runs the Bun suite, main TypeScript check, Worker TypeScript check, formatting check, and Wrangler dry-run in order. `test:hermes` runs the test Compose service from `hermes/compose.test.yaml`.
+`test:adapter` runs the local companion adapter suites without external credentials.
+
 Endpoints:
 
 - `GET /health`
 - `POST /telegram/webhook`
+- `POST /discord/interactions`
+- `POST /discord/gateway/messages` for the signed OVH Gateway bridge
+- `POST /events/queue-failure` for signed retry-exhausted job events
 - `GET /whatsapp/webhook` for Meta's verification challenge
 - `POST /whatsapp/webhook`
 - `POST /line/webhook`
@@ -30,6 +56,10 @@ Endpoints:
 All inbound provider requests are authenticated before their JSON body is processed:
 
 - Telegram checks `X-Telegram-Bot-Api-Secret-Token`.
+- Discord verifies `X-Signature-Ed25519` over the exact timestamp and raw body.
+- The Discord Gateway bridge signs the exact timestamp and raw body with a
+  separate HMAC-SHA256 secret and the Worker rejects requests older than five
+  minutes.
 - WhatsApp checks `X-Hub-Signature-256` against the exact raw body with the Meta App Secret.
 - LINE checks `x-line-signature` against the exact raw body with HMAC-SHA256 and the channel secret.
 
@@ -48,8 +78,12 @@ Telegram access is deny-by-default. Send `/whoami` to the bot to see your own
 Telegram user ID, then add that numeric ID to `TELEGRAM_ALLOWED_USER_IDS`.
 Separate multiple IDs with commas. Unauthorized users receive only their own ID;
 their messages never reach session memory, OpenAI, or GitHub.
-Allowed users can send `/clear-session` (or `/clear_session`) to delete the
-current chat's conversation history and start fresh with the next message.
+Allowed users can send `/clear` to delete the current chat's conversation
+history and start fresh with the next message.
+Normal messages go directly to general Hermes chat. Use `/code` followed by a
+question to choose any repository visible to `GITHUB_TOKEN`, then choose one of
+its live GitHub branches with Telegram buttons. The legacy `repo:` / `branch:`
+header format also remains supported.
 
 Expose the server over HTTPS, then register the webhook. Telegram accepts only `A-Z`, `a-z`, `0-9`, `_`, and `-` in the webhook secret.
 
@@ -59,11 +93,105 @@ curl -X POST "https://api.telegram.org/bot${TELEGRAM_BOT_TOKEN}/setWebhook" \
   -d '{
     "url": "https://agent.example.com/telegram/webhook",
     "secret_token": "replace-with-the-same-webhook-secret",
-    "allowed_updates": ["message"]
+    "allowed_updates": ["message", "callback_query"]
   }'
 ```
 
 The Bot API token is part of Telegram's request URL. Avoid saving the expanded command in shell history or logs.
+
+The Queue consumer sends Telegram's `typing` chat action immediately and refreshes it every four seconds while the agent is working. Failure to publish the indicator is logged but never fails the agent job.
+
+## Discord setup
+
+Create an application in the Discord Developer Portal. Copy its Application ID
+and Public Key, then set the Worker variables in `wrangler.jsonc`:
+
+```jsonc
+"DISCORD_APPLICATION_ID": "123456789012345678",
+"DISCORD_PUBLIC_KEY": "64-character-hex-public-key",
+"DISCORD_ALLOWED_USER_IDS": "your-numeric-discord-user-id"
+```
+
+Discord access is deny-by-default. Only IDs in `DISCORD_ALLOWED_USER_IDS` can
+queue agent work. Set the application's Interactions Endpoint URL to
+`https://agent.pakzartl.xyz/discord/interactions`; Discord's signed PING request
+must succeed before the portal accepts it.
+
+Put the bot token in local `.env.local`, then register the Discord capability
+commands:
+
+```dotenv
+DISCORD_APPLICATION_ID=123456789012345678
+DISCORD_BOT_TOKEN=replace-with-discord-bot-token
+DISCORD_ALLOWED_USER_IDS=123456789012345678
+DISCORD_ALLOWED_GUILD_IDS=123456789012345678
+DISCORD_GATEWAY_SHARED_SECRET=replace-with-at-least-32-random-characters
+DISCORD_WORKER_GATEWAY_URL=https://agent.pakzartl.xyz/discord/gateway/messages
+# Optional for immediate test-server registration; omit for global commands.
+DISCORD_GUILD_ID=123456789012345678
+```
+
+```sh
+bun run discord:register
+```
+
+`/code` autocompletes every repository visible to `GITHUB_TOKEN`, then
+autocompletes branches from the selected repository. Agent commands respond
+with an ephemeral deferred message immediately; the Queue consumer replaces it
+with the Hermes result and keeps overflow followups ephemeral.
+
+Natural code chat runs alongside the slash commands. Mention the bot with a
+question, reply with a repository, then reply with a branch. Follow-up selection
+messages do not need another mention. The OVH `discord-gateway` container keeps
+the outbound Gateway connection and forwards allowlisted messages to the signed
+Worker endpoint; it exposes no inbound port. Enable **Message Content Intent**
+for the bot in Discord Developer Portal so unmentioned repo/branch follow-ups
+contain their text. The Worker sends `typing` while Hermes is processing and
+posts the final answer back to the channel. Unmentioned messages outside an
+active selection flow are ignored. The adapter reuses the existing Queue and
+Durable Object, so it adds no Cloudflare resource.
+
+### Discord capability commands
+
+- `/code` investigates an explicit repository and branch and attaches a cited HIL artifact.
+- `/risk` inspects an implementation or deployment change and returns blast radius, side effects, a Human Test Plan, and a HIL artifact.
+- `/db` maps a Thai/English question or explicit `SELECT`/`WITH` query to an immutable read-only plan, shows the SQL and limits, and runs it only after the requesting user presses **Approve query**. Live planning and execution stay disabled unless the complete adapter, allowlist, and schema-catalog block is configured; mutations, comments, multi-statements, unsafe functions, non-allowlisted tables, oversized results, and unmasked PII fail closed.
+- `/artifact` creates a Markdown, JSON, CSV, diagram, or screenshot artifact. Text artifacts are generated through the existing model path and validated before attachment. Screenshots accept either a server-owned `target_id` preset or an explicit credential-free public HTTPS `url`, never both. The Worker validates the URL first; the OVH renderer validates DNS again, rejects private/local addresses, pins the resolved public address, and blocks navigation to other hosts. Production includes the no-cost OVH companion renderer and a `javis-health` demo target.
+- `/deploy` accepts an allowlisted repository, immutable 40-character commit SHA, and autocomplete target. It creates a plan first, then requires the requesting user to press **Approve deploy** before the external executor is called. Approval is bound to user, guild, target, repository, SHA, expiry, and plan digest.
+- `/status request_id:<id>` reads the persisted capability lifecycle and latest audit entry.
+- `/skills` lists the demo and output artifact for every capability.
+- `/clear` clears the caller's channel-scoped Hermes conversation.
+
+All capability jobs use the existing Durable Object for `queued → running → waiting_approval → completed/failed/cancelled` state and the existing Queue for execution. Database and deploy requests first create immutable plans; neither can call its executor before a matching approval.
+
+### Optional capability adapters
+
+Leave an entire block blank to keep that capability safely disabled. Tokens are secrets and must be uploaded with Wrangler, not committed.
+
+```dotenv
+# Bounded read-only HTTP adapter
+DATABASE_ADAPTER_URL=https://db-reader.example/db/query
+DATABASE_ADAPTER_TOKEN=secret
+DATABASE_DATASOURCE=lms-read-replica
+DATABASE_ALLOWED_SCHEMAS=public,reporting
+DATABASE_ALLOWED_TABLES=public.users,reporting.course_progress
+DATABASE_SCHEMA_CATALOG_JSON={"datasource":"lms-read-replica","tables":[{"schema":"public","name":"users","description":"บัญชีผู้เรียน learner users","columns":[{"name":"id","type":"uuid"},{"name":"email","type":"text","sensitive":true},{"name":"status","type":"text"}]}]}
+
+# Screenshot renderer; targets are IDs mapped to URLs on the server
+ARTIFACT_RENDERER_URL=https://renderer.example/capture
+ARTIFACT_RENDERER_TOKEN=secret
+ARTIFACT_SCREENSHOT_TARGETS_JSON=[{"id":"learner-preview","url":"https://learner.example"}]
+
+# Approval-gated deploy executor
+DEPLOY_EXECUTOR_TOKEN=secret
+DEPLOY_TARGETS_JSON=[{"id":"worker-dev","displayName":"Worker development","environment":"development","allowedRepositories":["owner/repo"],"executorUrl":"https://deploy.example/run","healthcheckUrl":"https://example.com/health"}]
+```
+
+The DB and deploy endpoints must use credential-free HTTPS URLs; bearer tokens are sent separately. The included OVH DB adapter is a separate optional Compose profile that exposes `POST /db/query`, validates the Worker fingerprint and limits again, starts a PostgreSQL transaction in read-only mode, and refuses writes, comments, multi-statements, unsafe functions, unknown datasources, and limit escalation before execution. It requires a read-only PostgreSQL connection string supplied only through the VPS `env.local`. The loopback-only OVH deploy executor receives a finite JSON plan and idempotency key, never a shell command. It deploys only an allowlisted repository and exact commit SHA. A failed deploy returns rollback guidance but never rolls back automatically; rollback requires a separate approved plan.
+
+### Queue-failure event artifact
+
+Set `QUEUE_FAILURE_EVENT_SECRET` and optionally `QUEUE_FAILURE_DISCORD_CHANNEL_ID`. Producers send a bounded `queue-failure/v1` JSON body to `/events/queue-failure` with the current Unix seconds in `X-Javis-Timestamp` and `X-Javis-Signature: sha256=<HMAC-SHA256(timestamp + "." + body)>`. The Worker rejects signatures older or newer than five minutes, verifies the raw body, deduplicates the event, redacts credentials and PII, classifies the likely cause, and posts one Markdown HIL artifact to Discord. No event secret means the endpoint returns `503`.
 
 ## WhatsApp setup
 
@@ -97,7 +225,9 @@ The production Worker is configured in `wrangler.jsonc` with:
 
 - Custom Domain: `https://agent.pakzartl.xyz`
 - Worker name: `poc-line-agent`
-- KV-backed session memory through the `SESSION_MEMORY` binding
+- KV-backed legacy session memory/cache/audit through the `SESSION_MEMORY` binding
+- Durable Object-backed Telegram idempotency through `TELEGRAM_SESSION_COORDINATOR`
+- Shared Telegram/Discord queue and DLQ for asynchronous processing
 - Workers logs and sampled traces enabled
 
 Authenticate, generate binding types, validate the bundle, and deploy:
@@ -105,8 +235,7 @@ Authenticate, generate binding types, validate the bundle, and deploy:
 ```sh
 bunx wrangler login --use-keyring
 bun run worker:types
-bun run typecheck:worker
-bun run worker:dry-run
+bun run test:worker
 bun run worker:deploy
 ```
 
@@ -117,10 +246,47 @@ Upload secrets with `wrangler secret put` or `wrangler secret bulk`; never add t
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_WEBHOOK_SECRET`
 - `TELEGRAM_ALLOWED_USER_IDS`
+- `DISCORD_ALLOWED_USER_IDS`
+- `DISCORD_BOT_TOKEN`
+- `DISCORD_GATEWAY_SHARED_SECRET`
+- `DISCORD_ALLOWED_GUILD_IDS`
 - `OPENAI_API_KEY`
 - `GITHUB_TOKEN`
+- `HERMES_API_SERVER_KEY`
 
-After deployment, register `https://agent.pakzartl.xyz/telegram/webhook` with Telegram and `https://agent.pakzartl.xyz/line/webhook` with LINE. LINE also requires **Use webhook** to be enabled in the Messaging API channel settings.
+Optional capability secrets are `QUEUE_FAILURE_EVENT_SECRET`, `DATABASE_ADAPTER_TOKEN`, `ARTIFACT_RENDERER_TOKEN`, and `DEPLOY_EXECUTOR_TOKEN`. Upload only the blocks that have an actual external adapter; blank optional configuration is intentionally fail-closed.
+
+Production sets `HERMES_BASE_URL=https://hermes.pakzartl.xyz`. `HERMES_API_SERVER_KEY` must match the VPS `API_SERVER_KEY`; keep both values outside git and inject the Worker value with Wrangler secret storage.
+
+After deployment, register `https://agent.pakzartl.xyz/telegram/webhook` with Telegram, `https://agent.pakzartl.xyz/discord/interactions` with Discord, and `https://agent.pakzartl.xyz/line/webhook` with LINE. LINE also requires **Use webhook** to be enabled in the Messaging API channel settings.
+
+## Hermes runtime
+
+Hermes assets live under `hermes/`:
+
+- `compose.yaml` pins `nousresearch/hermes-agent:v2026.9.24@sha256:fca358f12efd65bfaaca05884166f15c0e2788375ca30d77061ac1ebc96452b7`, exposes the API server on `127.0.0.1:8642`, mounts `/srv/hermes/data:/opt/data`, and mounts local plugin/skill directories read-only.
+- `config.template.yaml` enables the Hermes API server and the read-only GitHub plugin.
+- `plugins/poc-line-agent-github/` mirrors the current read-only GitHub tool surface.
+- `skills/*/SKILL.md` mirrors the current Worker Markdown skills in Hermes-compatible form.
+- `tests/` contains plugin, skill, and Sessions API spike checks.
+- `runbook.md` documents the OVH production deployment, Tunnel, validation, rollback, backup, and upgrade gates.
+
+For local Hermes validation:
+
+```sh
+cp hermes/env.template hermes/env.local
+docker compose -f hermes/compose.yaml config
+docker compose -f hermes/compose.yaml pull
+docker compose -f hermes/compose.yaml up -d
+curl -fsS http://127.0.0.1:8642/health
+bun run test:hermes
+```
+
+`hermes/env.local` and local Hermes data directories are ignored by git. Keep real `API_SERVER_KEY`, OpenAI keys, and GitHub tokens outside committed files.
+
+Before Telegram Hermes canary, run the Sessions API spike from the test container against the pinned image and confirm isolation, message retrieval metadata, and restart persistence. If that spike fails, keep `AGENT_RUNTIME=legacy`.
+
+Rollback is config-only for routing: set `AGENT_RUNTIME=legacy` or remove Hermes canary users in `AGENT_RUNTIME=fallback`. Do not remove the Durable Object binding/migration during a normal rollback.
 
 ## Local sandbox
 
@@ -175,9 +341,15 @@ Defaults:
 - `OPENAI_MAX_TOOL_ROUNDS` defaults to `50`; the model stops earlier as soon as it can answer. If it reaches the limit, it returns a best-effort summary from the evidence already collected.
 - `OPENAI_MAX_TOOL_CALLS` defaults to `100` and caps the total tools executed even when one model round requests several tools.
 - `GITHUB_TOKEN` with read-only repository contents/search access.
-- `GITHUB_REF` defaults to `main`. Branch-aware code search and file reads use this exact ref; production currently uses `dev`.
+- `GITHUB_REF` remains a legacy-runtime compatibility default. Hermes code search does not use it.
+- `/code` lists every repository the configured `GITHUB_TOKEN` can read, including owned, collaborator, and organization repositories. General chat does not receive a repository scope.
 - `TELEGRAM_ALLOWED_USER_IDS` is a comma-separated allowlist of numeric Telegram
   user IDs. An empty list denies all agent access except `/whoami`.
+- `DISCORD_ALLOWED_USER_IDS` is a comma-separated allowlist of numeric Discord user IDs. An empty list leaves the Discord endpoint disabled.
+- `AGENT_RUNTIME` defaults to `legacy`. Use `fallback` for Telegram user canaries and `hermes` only after the Hermes health, spike, Worker, and canary gates pass.
+- `HERMES_BASE_URL` is the Worker-to-Hermes API origin, for example a private Cloudflare Tunnel URL or local `http://127.0.0.1:8642`.
+- `HERMES_API_SERVER_KEY` is a Worker secret matching Hermes `API_SERVER_KEY`.
+- `HERMES_TELEGRAM_ALLOWED_USER_IDS` controls the Telegram Hermes canary only in `AGENT_RUNTIME=fallback`. In `AGENT_RUNTIME=hermes`, every allowed Telegram agent request routes to Hermes.
 - `SESSION_MEMORY_DIR` defaults to `.sessions`.
 - `SESSION_MEMORY_MAX_MESSAGES` defaults to `12` messages (six user/assistant turns).
 
@@ -213,16 +385,15 @@ Included skills:
 
 The model can request:
 
-- `list_repositories()`
-- `github_get(path)` for allowlisted GitHub REST GET endpoints
-- `search_code(repository, query, ref?)` scans the configured ref; separate literal
-  alternatives with `|` to search the downloaded branch archive once.
-- `read_file(repository, path, ref?)`
-- `get_commit(repository, sha)`
+- `search_code(query)` scans the runtime-bound repository and branch; separate
+  literal alternatives with `|` to search the downloaded branch archive once.
+- `read_file(path)` reads from that same bound repository and branch.
 
-All GitHub requests are made by the backend with HTTP `GET` only. Mutation tools
-and arbitrary external URLs are blocked. Branch archive redirects issued by
-GitHub are followed for bounded streaming search. Tokens are never included in
-model input or chat replies.
+Repository and branch are injected by a Hermes `pre_tool_call` policy hook from
+the latest runtime-created scope envelope; the model cannot choose or override
+them. Broad repository listing and generic GitHub REST tools are not exposed.
+All GitHub requests are backend HTTP `GET` reads. Branch archive redirects
+issued by GitHub are followed for bounded streaming search. Tokens are never
+included in model input or chat replies.
 
 Responses are sent with `store: false`; only bounded tool output is returned to the model.

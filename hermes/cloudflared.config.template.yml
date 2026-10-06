@@ -1,0 +1,16 @@
+tunnel: 04f4553e-c475-424b-b0b6-22f4c4106400
+credentials-file: /etc/cloudflared/04f4553e-c475-424b-b0b6-22f4c4106400.json
+protocol: quic
+metrics: 127.0.0.1:20241
+ingress:
+  - hostname: hermes.pakzartl.xyz
+    service: http://127.0.0.1:8642
+  - hostname: capabilities.pakzartl.xyz
+    service: http://127.0.0.1:8788
+  # Approval-gated Hermes deployment executor. The service itself binds loopback.
+  - hostname: deploy.pakzartl.xyz
+    service: http://127.0.0.1:8790
+  # Optional. Enable only after DB_ADAPTER_* points at a read-only datasource.
+  - hostname: db-capabilities.pakzartl.xyz
+    service: http://127.0.0.1:8789
+  - service: http_status:404

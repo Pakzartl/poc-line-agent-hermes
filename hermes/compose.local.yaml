@@ -1,0 +1,15 @@
+services:
+  hermes:
+    env_file:
+      - path: ./env.local
+        required: false
+      - path: ./env.smoke
+        required: false
+    volumes:
+      - hermes-smoke-data:/opt/data
+      - ./config.template.yaml:/opt/data/config.yaml:ro
+      - ./plugins:/opt/data/plugins:ro
+      - ./skills:/opt/poc-line-agent-skills:ro
+
+volumes:
+  hermes-smoke-data:

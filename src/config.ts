@@ -1,5 +1,10 @@
+import { parseDbSchemaCatalogJson } from "./db/nl-planner";
+
 export type AppConfig = {
 	port: number;
+	runtime: {
+		mode: AgentRuntimeMode;
+	};
 	line: {
 		channelSecret: string;
 		channelAccessToken: string;
@@ -9,6 +14,15 @@ export type AppConfig = {
 		botToken: string;
 		webhookSecret: string;
 		allowedUserIds: readonly string[];
+		apiBaseUrl: string;
+	};
+	discord: {
+		applicationId: string;
+		publicKey: string;
+		botToken: string;
+		gatewaySharedSecret: string;
+		allowedUserIds: readonly string[];
+		allowedGuildIds: readonly string[];
 		apiBaseUrl: string;
 	};
 	whatsapp: {
@@ -36,11 +50,36 @@ export type AppConfig = {
 		directory: string;
 		maxMessages: number;
 	};
+	hermes: {
+		baseUrl: string;
+		apiServerKey: string;
+		telegramAllowedUserIds: readonly string[];
+	};
+	events?: {
+		queueFailureSecret: string;
+		queueFailureDiscordChannelId: string;
+	};
+	capabilities?: {
+		databaseAdapterUrl: string;
+		databaseAdapterToken: string;
+		databaseDatasource: string;
+		databaseAllowedSchemas: readonly string[];
+		databaseAllowedTables: readonly string[];
+		databaseSchemaCatalogJson: string;
+		artifactRendererUrl: string;
+		artifactRendererToken: string;
+		artifactScreenshotTargetsJson: string;
+		deployTargetsJson: string;
+		deployExecutorToken: string;
+	};
 };
+
+export type AgentRuntimeMode = "legacy" | "hermes" | "fallback";
 
 const defaultOpenAiBaseUrl = "https://api.openai.com/v1";
 const defaultLineApiBaseUrl = "https://api.line.me";
 const defaultTelegramApiBaseUrl = "https://api.telegram.org";
+const defaultDiscordApiBaseUrl = "https://discord.com/api/v10";
 const defaultWhatsAppApiBaseUrl = "https://graph.facebook.com/v26.0";
 
 export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
@@ -48,6 +87,9 @@ export type ConfigEnvironment = Readonly<Record<string, string | undefined>>;
 export function loadConfig(env: ConfigEnvironment): AppConfig {
 	return {
 		port: Number(env.PORT ?? "3000"),
+		runtime: {
+			mode: parseRuntimeMode(env.AGENT_RUNTIME),
+		},
 		line: {
 			channelSecret: env.LINE_CHANNEL_SECRET ?? "",
 			channelAccessToken: env.LINE_CHANNEL_ACCESS_TOKEN ?? "",
@@ -61,6 +103,17 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
 			allowedUserIds: parseList(env.TELEGRAM_ALLOWED_USER_IDS),
 			apiBaseUrl: stripTrailingSlash(
 				env.TELEGRAM_API_BASE_URL ?? defaultTelegramApiBaseUrl,
+			),
+		},
+		discord: {
+			applicationId: env.DISCORD_APPLICATION_ID ?? "",
+			publicKey: env.DISCORD_PUBLIC_KEY ?? "",
+			botToken: env.DISCORD_BOT_TOKEN ?? "",
+			gatewaySharedSecret: env.DISCORD_GATEWAY_SHARED_SECRET ?? "",
+			allowedUserIds: parseList(env.DISCORD_ALLOWED_USER_IDS),
+			allowedGuildIds: parseList(env.DISCORD_ALLOWED_GUILD_IDS),
+			apiBaseUrl: stripTrailingSlash(
+				env.DISCORD_API_BASE_URL ?? defaultDiscordApiBaseUrl,
 			),
 		},
 		whatsapp: {
@@ -92,15 +145,40 @@ export function loadConfig(env: ConfigEnvironment): AppConfig {
 			directory: env.SESSION_MEMORY_DIR ?? ".sessions",
 			maxMessages: Number(env.SESSION_MEMORY_MAX_MESSAGES ?? "12"),
 		},
+		hermes: {
+			baseUrl: stripTrailingSlash(env.HERMES_BASE_URL ?? ""),
+			apiServerKey: env.HERMES_API_SERVER_KEY ?? "",
+			telegramAllowedUserIds: parseList(env.HERMES_TELEGRAM_ALLOWED_USER_IDS),
+		},
+		events: {
+			queueFailureSecret: env.QUEUE_FAILURE_EVENT_SECRET ?? "",
+			queueFailureDiscordChannelId: env.QUEUE_FAILURE_DISCORD_CHANNEL_ID ?? "",
+		},
+		capabilities: {
+			databaseAdapterUrl: stripTrailingSlash(env.DATABASE_ADAPTER_URL ?? ""),
+			databaseAdapterToken: env.DATABASE_ADAPTER_TOKEN ?? "",
+			databaseDatasource: env.DATABASE_DATASOURCE ?? "",
+			databaseAllowedSchemas: parseList(env.DATABASE_ALLOWED_SCHEMAS),
+			databaseAllowedTables: parseList(env.DATABASE_ALLOWED_TABLES),
+			databaseSchemaCatalogJson: env.DATABASE_SCHEMA_CATALOG_JSON ?? "",
+			artifactRendererUrl: stripTrailingSlash(env.ARTIFACT_RENDERER_URL ?? ""),
+			artifactRendererToken: env.ARTIFACT_RENDERER_TOKEN ?? "",
+			artifactScreenshotTargetsJson: env.ARTIFACT_SCREENSHOT_TARGETS_JSON ?? "",
+			deployTargetsJson: env.DEPLOY_TARGETS_JSON ?? "",
+			deployExecutorToken: env.DEPLOY_EXECUTOR_TOKEN ?? "",
+		},
 	};
 }
 
 export function validateConfig(config: AppConfig): void {
-	const requiredValues = [
-		["OPENAI_API_KEY", config.llm.apiKey],
-		["OPENAI_MODEL", config.llm.model],
-		["GITHUB_TOKEN", config.github.token],
-	] as const;
+	const requiredValues: [string, string][] = [];
+	if (routeUsesLegacySecrets(config)) {
+		requiredValues.push(
+			["OPENAI_API_KEY", config.llm.apiKey],
+			["OPENAI_MODEL", config.llm.model],
+			["GITHUB_TOKEN", config.github.token],
+		);
+	}
 	const missing = requiredValues
 		.filter(([, value]) => !value.trim())
 		.map(([name]) => name);
@@ -124,6 +202,14 @@ export function validateConfig(config: AppConfig): void {
 			values: [
 				["TELEGRAM_BOT_TOKEN", config.telegram.botToken],
 				["TELEGRAM_WEBHOOK_SECRET", config.telegram.webhookSecret],
+			],
+		},
+		{
+			name: "Discord",
+			values: [
+				["DISCORD_APPLICATION_ID", config.discord.applicationId],
+				["DISCORD_PUBLIC_KEY", config.discord.publicKey],
+				["DISCORD_ALLOWED_USER_IDS", config.discord.allowedUserIds.join(",")],
 			],
 		},
 		{
@@ -154,10 +240,45 @@ export function validateConfig(config: AppConfig): void {
 		configuredProviders += 1;
 	}
 
+	const discordGatewayValues: [string, string][] = [
+		["DISCORD_BOT_TOKEN", config.discord.botToken],
+		["DISCORD_GATEWAY_SHARED_SECRET", config.discord.gatewaySharedSecret],
+		["DISCORD_ALLOWED_GUILD_IDS", config.discord.allowedGuildIds.join(",")],
+	];
+	const presentDiscordGatewayValues = discordGatewayValues.filter(([, value]) =>
+		value.trim(),
+	);
+	if (
+		presentDiscordGatewayValues.length > 0 &&
+		presentDiscordGatewayValues.length < discordGatewayValues.length
+	) {
+		const missingDiscordGatewayValues = discordGatewayValues
+			.filter(([, value]) => !value.trim())
+			.map(([name]) => name);
+		throw new Error(
+			`Incomplete Discord Gateway configuration: ${missingDiscordGatewayValues.join(", ")}`,
+		);
+	}
+
 	if (configuredProviders === 0) {
 		throw new Error(
-			"Configure at least one messaging provider: LINE, Telegram, or WhatsApp",
+			"Configure at least one messaging provider: LINE, Telegram, Discord, or WhatsApp",
 		);
+	}
+
+	if (config.runtime.mode !== "legacy") {
+		const hermesValues: [string, string][] = [
+			["HERMES_BASE_URL", config.hermes.baseUrl],
+			["HERMES_API_SERVER_KEY", config.hermes.apiServerKey],
+		];
+		const missingHermes = hermesValues
+			.filter(([, value]) => !value.trim())
+			.map(([name]) => name);
+		if (missingHermes.length > 0) {
+			throw new Error(
+				`Missing required Hermes environment variables: ${missingHermes.join(", ")}`,
+			);
+		}
 	}
 
 	const invalidTelegramUserIds = config.telegram.allowedUserIds.filter(
@@ -168,6 +289,52 @@ export function validateConfig(config: AppConfig): void {
 			"TELEGRAM_ALLOWED_USER_IDS must contain comma-separated positive integers",
 		);
 	}
+
+	const invalidDiscordUserIds = config.discord.allowedUserIds.filter(
+		(userId) => !/^[1-9]\d{0,19}$/.test(userId),
+	);
+	if (invalidDiscordUserIds.length > 0) {
+		throw new Error(
+			"DISCORD_ALLOWED_USER_IDS must contain comma-separated positive integers",
+		);
+	}
+	const invalidDiscordGuildIds = config.discord.allowedGuildIds.filter(
+		(guildId) => !/^[1-9]\d{0,19}$/.test(guildId),
+	);
+	if (invalidDiscordGuildIds.length > 0) {
+		throw new Error(
+			"DISCORD_ALLOWED_GUILD_IDS must contain comma-separated positive integers",
+		);
+	}
+	if (
+		config.discord.gatewaySharedSecret &&
+		config.discord.gatewaySharedSecret.length < 32
+	) {
+		throw new Error(
+			"DISCORD_GATEWAY_SHARED_SECRET must contain at least 32 characters",
+		);
+	}
+	if (
+		config.discord.applicationId &&
+		!/^[1-9]\d{0,19}$/.test(config.discord.applicationId)
+	) {
+		throw new Error("DISCORD_APPLICATION_ID must be a positive integer");
+	}
+	if (
+		config.discord.publicKey &&
+		!/^[0-9a-f]{64}$/i.test(config.discord.publicKey)
+	) {
+		throw new Error("DISCORD_PUBLIC_KEY must be a 32-byte hexadecimal key");
+	}
+	if (
+		config.events?.queueFailureDiscordChannelId &&
+		!/^[1-9]\d{5,19}$/.test(config.events.queueFailureDiscordChannelId)
+	) {
+		throw new Error(
+			"QUEUE_FAILURE_DISCORD_CHANNEL_ID must be a Discord snowflake",
+		);
+	}
+	validateOptionalCapabilityConfig(config);
 
 	if (
 		!Number.isInteger(config.port) ||
@@ -211,13 +378,28 @@ export function validateConfig(config: AppConfig): void {
 		throw new Error("SESSION_MEMORY_DIR is required");
 	}
 
-	for (const [name, value] of [
+	const invalidHermesTelegramUserIds =
+		config.hermes.telegramAllowedUserIds.filter(
+			(userId) => !/^[1-9]\d{0,19}$/.test(userId),
+		);
+	if (invalidHermesTelegramUserIds.length > 0) {
+		throw new Error(
+			"HERMES_TELEGRAM_ALLOWED_USER_IDS must contain comma-separated positive integers",
+		);
+	}
+
+	const urlsToValidate: [string, string][] = [
 		["OPENAI_BASE_URL", config.llm.baseUrl],
 		["LINE_API_BASE_URL", config.line.apiBaseUrl],
 		["TELEGRAM_API_BASE_URL", config.telegram.apiBaseUrl],
+		["DISCORD_API_BASE_URL", config.discord.apiBaseUrl],
 		["WHATSAPP_API_BASE_URL", config.whatsapp.apiBaseUrl],
 		["GITHUB_API_BASE_URL", config.github.apiBaseUrl],
-	] as const) {
+	];
+	if (config.runtime.mode !== "legacy") {
+		urlsToValidate.push(["HERMES_BASE_URL", config.hermes.baseUrl]);
+	}
+	for (const [name, value] of urlsToValidate) {
 		try {
 			new URL(value);
 		} catch {
@@ -226,8 +408,94 @@ export function validateConfig(config: AppConfig): void {
 	}
 }
 
+function validateOptionalCapabilityConfig(config: AppConfig): void {
+	const capabilities = config.capabilities;
+	if (!capabilities) return;
+	validateOptionalPair("database adapter", [
+		["DATABASE_ADAPTER_URL", capabilities.databaseAdapterUrl],
+		["DATABASE_ADAPTER_TOKEN", capabilities.databaseAdapterToken],
+		["DATABASE_DATASOURCE", capabilities.databaseDatasource],
+		["DATABASE_ALLOWED_SCHEMAS", capabilities.databaseAllowedSchemas.join(",")],
+		["DATABASE_ALLOWED_TABLES", capabilities.databaseAllowedTables.join(",")],
+		["DATABASE_SCHEMA_CATALOG_JSON", capabilities.databaseSchemaCatalogJson],
+	]);
+	if (capabilities.databaseSchemaCatalogJson.trim()) {
+		const catalog = parseDbSchemaCatalogJson(
+			capabilities.databaseSchemaCatalogJson,
+		);
+		if (catalog.datasource !== capabilities.databaseDatasource) {
+			throw new Error(
+				"DATABASE_SCHEMA_CATALOG_JSON datasource must match DATABASE_DATASOURCE",
+			);
+		}
+	}
+	validateOptionalPair("artifact renderer", [
+		["ARTIFACT_RENDERER_URL", capabilities.artifactRendererUrl],
+		["ARTIFACT_RENDERER_TOKEN", capabilities.artifactRendererToken],
+		[
+			"ARTIFACT_SCREENSHOT_TARGETS_JSON",
+			capabilities.artifactScreenshotTargetsJson,
+		],
+	]);
+	if (
+		Boolean(capabilities.deployTargetsJson.trim()) !==
+		Boolean(capabilities.deployExecutorToken.trim())
+	) {
+		throw new Error(
+			"Incomplete deploy executor configuration: DEPLOY_TARGETS_JSON and DEPLOY_EXECUTOR_TOKEN must be set together",
+		);
+	}
+	for (const [name, value] of [
+		["DATABASE_ADAPTER_URL", capabilities.databaseAdapterUrl],
+		["ARTIFACT_RENDERER_URL", capabilities.artifactRendererUrl],
+	] as const) {
+		if (!value) continue;
+		const url = new URL(value);
+		if (url.protocol !== "https:" || url.username || url.password) {
+			throw new Error(`${name} must use credential-free HTTPS`);
+		}
+	}
+}
+
+function validateOptionalPair(
+	label: string,
+	values: readonly (readonly [string, string])[],
+): void {
+	const present = values.filter(([, value]) => value.trim());
+	if (present.length === 0 || present.length === values.length) return;
+	const missing = values
+		.filter(([, value]) => !value.trim())
+		.map(([name]) => name);
+	throw new Error(`Incomplete ${label} configuration: ${missing.join(", ")}`);
+}
+
+function routeUsesLegacySecrets(config: AppConfig): boolean {
+	if (config.runtime.mode === "legacy" || config.runtime.mode === "fallback") {
+		return true;
+	}
+	return (
+		Boolean(config.line.channelSecret && config.line.channelAccessToken) ||
+		Boolean(
+			config.whatsapp.accessToken &&
+				config.whatsapp.phoneNumberId &&
+				config.whatsapp.verifyToken &&
+				config.whatsapp.appSecret,
+		)
+	);
+}
+
 function stripTrailingSlash(value: string): string {
 	return value.replace(/\/+$/, "");
+}
+
+function parseRuntimeMode(value: string | undefined): AgentRuntimeMode {
+	if (!value) {
+		return "legacy";
+	}
+	if (value === "legacy" || value === "hermes" || value === "fallback") {
+		return value;
+	}
+	throw new Error("AGENT_RUNTIME must be one of: legacy, hermes, fallback");
 }
 
 function parseList(value: string | undefined): string[] {

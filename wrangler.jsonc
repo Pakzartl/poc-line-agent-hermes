@@ -24,6 +24,20 @@
 			"binding": "SESSION_MEMORY"
 		}
 	],
+	"durable_objects": {
+		"bindings": [
+			{
+				"name": "TELEGRAM_SESSION_COORDINATOR",
+				"class_name": "TelegramSessionCoordinator"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["TelegramSessionCoordinator"]
+		}
+	],
 	"queues": {
 		"producers": [
 			{
@@ -39,6 +53,13 @@
 				"max_retries": 2,
 				"dead_letter_queue": "poc-line-agent-telegram-jobs-dlq",
 				"max_concurrency": 1
+			},
+			{
+				"queue": "poc-line-agent-telegram-jobs-dlq",
+				"max_batch_size": 1,
+				"max_batch_timeout": 1,
+				"max_retries": 2,
+				"max_concurrency": 1
 			}
 		]
 	},
@@ -49,13 +70,22 @@
 			"TELEGRAM_BOT_TOKEN",
 			"TELEGRAM_WEBHOOK_SECRET",
 			"TELEGRAM_ALLOWED_USER_IDS",
+			"DISCORD_ALLOWED_USER_IDS",
+			"DISCORD_BOT_TOKEN",
+			"DISCORD_GATEWAY_SHARED_SECRET",
+			"DISCORD_ALLOWED_GUILD_IDS",
 			"OPENAI_API_KEY",
-			"GITHUB_TOKEN"
+			"GITHUB_TOKEN",
+			"HERMES_API_SERVER_KEY"
 		]
 	},
 	"vars": {
+		"AGENT_RUNTIME": "hermes",
 		"LINE_API_BASE_URL": "https://api.line.me",
 		"TELEGRAM_API_BASE_URL": "https://api.telegram.org",
+		"DISCORD_APPLICATION_ID": "1556207639229112360",
+		"DISCORD_PUBLIC_KEY": "e3814a07ad03178f24fe93b1aacc9b1cef679107658622f8a15c7679a5f0e339",
+		"DISCORD_API_BASE_URL": "https://discord.com/api/v10",
 		"WHATSAPP_API_BASE_URL": "https://graph.facebook.com/v26.0",
 		"WHATSAPP_ACCESS_TOKEN": "",
 		"WHATSAPP_PHONE_NUMBER_ID": "",
@@ -67,7 +97,18 @@
 		"OPENAI_MAX_TOOL_CALLS": "100",
 		"GITHUB_API_BASE_URL": "https://api.github.com",
 		"GITHUB_REF": "dev",
-		"SESSION_MEMORY_MAX_MESSAGES": "12"
+		"SESSION_MEMORY_MAX_MESSAGES": "12",
+		"HERMES_BASE_URL": "https://hermes.pakzartl.xyz",
+		"HERMES_TELEGRAM_ALLOWED_USER_IDS": "",
+		"QUEUE_FAILURE_DISCORD_CHANNEL_ID": "1556222756406956163",
+		"DATABASE_ADAPTER_URL": "",
+		"DATABASE_DATASOURCE": "",
+		"DATABASE_ALLOWED_SCHEMAS": "",
+		"DATABASE_ALLOWED_TABLES": "",
+		"DATABASE_SCHEMA_CATALOG_JSON": "",
+		"ARTIFACT_RENDERER_URL": "https://capabilities.pakzartl.xyz/artifact/render",
+		"ARTIFACT_SCREENSHOT_TARGETS_JSON": "[{\"id\":\"javis-health\",\"url\":\"https://agent.pakzartl.xyz/health\"}]",
+		"DEPLOY_TARGETS_JSON": "[{\"id\":\"hermes-ovh\",\"displayName\":\"Hermes OVH\",\"environment\":\"production\",\"allowedRepositories\":[\"Pakzartl/poc-line-agent-hermes\"],\"executorUrl\":\"https://deploy.pakzartl.xyz/deploy\",\"healthcheckUrl\":\"https://hermes.pakzartl.xyz/health\"}]"
 	},
 	"observability": {
 		"enabled": true,

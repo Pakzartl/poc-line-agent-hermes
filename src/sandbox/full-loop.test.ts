@@ -133,7 +133,7 @@ describe("local sandbox full loop", () => {
 			body: JSON.stringify({
 				message: {
 					message_id: 42,
-					text: "why does login fail?",
+					text: "repo: sandbox/repo\nbranch: main\nwhy does login fail?",
 					from: { id: 1001 },
 					chat: { id: 1001 },
 				},

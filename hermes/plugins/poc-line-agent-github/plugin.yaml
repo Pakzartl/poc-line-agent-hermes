@@ -1,0 +1,12 @@
+name: poc-line-agent-github
+version: 0.2.0
+manifest_version: 2
+api_version: 1
+description: Read-only GitHub tools for the poc-line-agent Hermes migration.
+license: MIT
+tags: [github, read-only, poc-line-agent]
+config_schema:
+  api_base_url:
+    type: str
+    default: "https://api.github.com"
+    description: "HTTPS GitHub REST API base URL. Defaults to public GitHub."

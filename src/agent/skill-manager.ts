@@ -1,7 +1,7 @@
 export const skillNames = [
 	"repo-overview",
 	"find-code",
-	"rate-limit-audit",
+	"code-scan",
 	"explain-code",
 	"trace-feature",
 	"recent-changes",
@@ -20,14 +20,49 @@ export const skillNames = [
 	"release-summary",
 	"incident-triage",
 	"repo-comparison",
+	"risk-assessment",
+	"deploy",
 ] as const;
 
 export type SkillName = (typeof skillNames)[number];
 
 const skillKeywords: { name: SkillName; terms: string[] }[] = [
 	{
-		name: "rate-limit-audit",
+		name: "deploy",
 		terms: [
+			"$deploy",
+			"deployment plan",
+			"deploy plan",
+			"วางแผน deploy",
+			"แผน deploy",
+		],
+	},
+	{
+		name: "risk-assessment",
+		terms: [
+			"$risk-assessment",
+			"risk assessment",
+			"blast radius",
+			"human test plan",
+			"ประเมินความเสี่ยง",
+		],
+	},
+	{
+		name: "code-scan",
+		terms: [
+			"code scan",
+			"scan code",
+			"scan repo",
+			"search the repo",
+			"across repo",
+			"whole repo",
+			"entire repo",
+			"all gateways",
+			"ทุก gateway",
+			"ทั้ง repo",
+			"ตรวจทั้ง repo",
+			"ค้นทั้ง repo",
+			"ไล่ทั้ง repo",
 			"rate limit",
 			"ratelimit",
 			"rate-limit",

@@ -27,16 +27,27 @@ describe("skill manager", () => {
 		["incident ระบบล่มเมื่อคืน", "incident-triage"],
 		["เทียบ repo api กับ web", "repo-comparison"],
 		["ใช้ $find-code หา config", "find-code"],
+		["ช่วยทำ risk assessment ก่อน release", "risk-assessment"],
+		["วางแผน deploy commit นี้ให้หน่อย", "deploy"],
 		[
 			"list custom ratelimit ออกมาให้หน่อย บอก api ไหนใช้ rate limit อะไร",
-			"rate-limit-audit",
+			"code-scan",
 		],
+		[
+			"scan ทุก gateway แล้วหาว่า request policy ถูก register ไว้ที่ไหนบ้าง",
+			"code-scan",
+		],
+		["ช่วยตรวจทั้ง repo ว่าฟีเจอร์นี้ต่อกันยังไง", "code-scan"],
 	] as const)("routes %s to %s", (question, expected) => {
 		expect(manager.selectSkill(question)).toBe(expected);
 	});
 
 	test("registers the full skill catalog", () => {
-		expect(skillNames).toHaveLength(21);
+		expect(skillNames).toHaveLength(23);
+		expect(skillNames).toContain("code-scan");
+		expect(skillNames).toContain("risk-assessment");
+		expect(skillNames).toContain("deploy");
+		expect(skillNames).not.toContain("rate-limit-audit");
 	});
 
 	test("loads every registered skill document", async () => {
