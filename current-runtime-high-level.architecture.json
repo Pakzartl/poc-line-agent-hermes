@@ -1,0 +1,335 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Javis / Hermes — Current High-Level Architecture",
+    "quality_profile": "showcase",
+    "repository": {
+      "url": "https://github.com/Pakzartl/poc-line-agent-hermes",
+      "revision": "f04f663a0aad7477f1be462d7b95d971578130fe"
+    },
+    "viewBox": [1390, 720],
+    "views": [
+      {
+        "id": "chat_path",
+        "label": "Chat request path",
+        "focus": ["users", "chat_platforms", "discord_gateway", "worker", "cloudflare_runtime", "cloudflare_tunnel", "hermes"],
+        "note": "Follow Discord or Telegram interactions through Cloudflare into the Hermes runtime."
+      },
+      {
+        "id": "tool_calls",
+        "label": "Agent tool calls",
+        "focus": ["hermes", "openai", "github", "capability_adapter"],
+        "note": "Hermes reasons over code and web research while bounded services perform infrastructure work."
+      },
+      {
+        "id": "observability_path",
+        "label": "OVH observability",
+        "focus": ["users", "cloudflare_tunnel", "observability", "hermes", "discord_gateway", "capability_adapter", "deploy_executor"],
+        "note": "The authenticated /ops dashboard exposes bounded host, container, service, and log telemetry."
+      },
+      {
+        "id": "mutation_path",
+        "label": "Approved mutation",
+        "focus": ["worker", "cloudflare_runtime", "deploy_executor", "github"],
+        "note": "Deploy requires stored approval and an immutable repository commit SHA."
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "users",
+      "type": "external",
+      "label": "User",
+      "sublabel": "chat, commands, /ops",
+      "pos": [20, 252],
+      "size": [130, 68]
+    },
+    {
+      "id": "chat_platforms",
+      "type": "external",
+      "label": "Discord / Telegram",
+      "sublabel": "API, interactions, messages",
+      "pos": [190, 250],
+      "size": [170, 72],
+      "sources": [
+        { "path": "README.md", "line": 48, "label": "public webhook routes" }
+      ]
+    },
+    {
+      "id": "worker",
+      "type": "cloud",
+      "label": "Cloudflare Worker",
+      "sublabel": "webhooks, routing, policy",
+      "tag": "poc-line-agent",
+      "pos": [430, 250],
+      "size": [180, 80],
+      "sources": [
+        { "path": "src/worker.ts", "line": 67, "label": "fetch and queue entrypoints" },
+        { "path": "src/app.ts", "line": 17, "label": "provider routing" }
+      ]
+    },
+    {
+      "id": "cloudflare_runtime",
+      "type": "database",
+      "label": "Queue + DO + KV",
+      "sublabel": "jobs, sessions, approvals",
+      "pos": [430, 80],
+      "size": [180, 72],
+      "sources": [
+        { "path": "wrangler.jsonc", "line": 22, "label": "state and queue bindings" },
+        { "path": "src/worker.ts", "line": 148, "label": "state adapters" }
+      ]
+    },
+    {
+      "id": "discord_gateway",
+      "type": "backend",
+      "label": "Discord Gateway",
+      "sublabel": "WebSocket event adapter",
+      "tag": "OVH VPS",
+      "pos": [190, 80],
+      "size": [170, 70],
+      "sources": [
+        { "path": "hermes/discord-gateway/src/index.ts", "line": 1, "label": "Discord WebSocket bridge" }
+      ]
+    },
+    {
+      "id": "cloudflare_tunnel",
+      "type": "security",
+      "label": "Cloudflare Tunnel",
+      "sublabel": "path routing to loopback",
+      "tag": "cloudflared",
+      "pos": [690, 250],
+      "size": [180, 72],
+      "sources": [
+        { "path": "hermes/cloudflared.config.template.yml", "line": 1, "label": "origin ingress routes" }
+      ]
+    },
+    {
+      "id": "hermes",
+      "type": "backend",
+      "label": "Hermes Agent",
+      "sublabel": "reasoning + investigation",
+      "pos": [940, 250],
+      "size": [180, 82],
+      "sources": [
+        { "path": "hermes/config.template.yaml", "line": 1, "label": "runtime and tool policy" },
+        { "path": "src/hermes/client.ts", "line": 56, "label": "Sessions API client" }
+      ]
+    },
+    {
+      "id": "openai",
+      "type": "external",
+      "label": "OpenAI API",
+      "sublabel": "model inference",
+      "pos": [950, 80],
+      "size": [160, 66],
+      "sources": [
+        { "path": "hermes/config.template.yaml", "line": 12, "label": "provider and model" }
+      ]
+    },
+    {
+      "id": "github",
+      "type": "external",
+      "label": "GitHub",
+      "sublabel": "refs, archives, clone",
+      "pos": [1200, 250],
+      "size": [160, 68],
+      "sources": [
+        { "path": "hermes/plugins/poc-line-agent-github/tools.py", "line": 37, "label": "bounded repository tools" }
+      ]
+    },
+    {
+      "id": "capability_adapter",
+      "type": "security",
+      "label": "Capability Adapter",
+      "sublabel": "screenshot + SSRF guard",
+      "pos": [940, 470],
+      "size": [190, 78],
+      "sources": [
+        { "path": "hermes/capability-adapter/src/server.ts", "line": 1, "label": "authenticated render API" },
+        { "path": "hermes/capability-adapter/src/renderer.ts", "line": 21, "label": "safe Chromium renderer" }
+      ]
+    },
+    {
+      "id": "observability",
+      "type": "backend",
+      "label": "OVH Observability",
+      "sublabel": "10s collector + Bun dashboard",
+      "tag": "/ops · Basic Auth",
+      "pos": [670, 470],
+      "size": [220, 82],
+      "sources": [
+        { "path": "hermes/observability-dashboard/collector.py", "line": 1, "label": "bounded metric and log snapshot" },
+        { "path": "hermes/observability-dashboard/server.ts", "line": 1, "label": "authenticated loopback dashboard" },
+        { "path": "hermes/runbook.md", "line": 1, "label": "operations and credential retrieval" }
+      ]
+    },
+    {
+      "id": "deploy_executor",
+      "type": "security",
+      "label": "Deploy Executor",
+      "sublabel": "exact SHA + Docker Compose",
+      "pos": [1190, 470],
+      "size": [180, 76],
+      "sources": [
+        { "path": "hermes/deploy-executor/src/server.ts", "line": 1, "label": "loopback deploy endpoint" },
+        { "path": "hermes/deploy-executor/src/deployer.ts", "line": 42, "label": "idempotent exact-SHA deploy" }
+      ]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "Cloudflare — pok.vip.08@gmail.com",
+      "wraps": ["worker", "cloudflare_runtime"],
+      "pad": 26
+    },
+    {
+      "kind": "security-group",
+      "label": "OVH VPS — loopback services behind Cloudflare Tunnel",
+      "wraps": ["discord_gateway", "cloudflare_tunnel", "hermes", "capability_adapter", "observability", "deploy_executor"],
+      "pad": 12
+    }
+  ],
+  "connections": [
+    {
+      "from": "users",
+      "to": "chat_platforms",
+      "label": "message / command",
+      "variant": "emphasis",
+      "fromSide": "right",
+      "toSide": "left",
+      "route": "straight",
+      "labelAt": [170, 344]
+    },
+    {
+      "from": "chat_platforms",
+      "to": "worker",
+      "label": "signed HTTPS ingress",
+      "variant": "emphasis",
+      "labelAt": [395, 344]
+    },
+    {
+      "from": "chat_platforms",
+      "to": "discord_gateway",
+      "label": "gateway events",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight",
+      "labelAt": [275, 206]
+    },
+    {
+      "from": "discord_gateway",
+      "to": "worker",
+      "label": "authenticated callback",
+      "variant": "security",
+      "fromSide": "right",
+      "toSide": "top",
+      "via": [[400, 115], [400, 220], [520, 220]],
+      "labelAt": [450, 185]
+    },
+    {
+      "from": "worker",
+      "to": "cloudflare_runtime",
+      "label": "enqueue + persist",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight",
+      "labelAt": [520, 206]
+    },
+    {
+      "from": "worker",
+      "to": "cloudflare_tunnel",
+      "label": "Sessions API HTTPS",
+      "variant": "emphasis",
+      "labelAt": [650, 344]
+    },
+    {
+      "from": "cloudflare_tunnel",
+      "to": "hermes",
+      "label": "127.0.0.1:8642",
+      "variant": "security",
+      "labelAt": [905, 344]
+    },
+    {
+      "from": "hermes",
+      "to": "openai",
+      "label": "inference",
+      "variant": "dashed",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight",
+      "labelAt": [1030, 206]
+    },
+    {
+      "from": "hermes",
+      "to": "github",
+      "label": "bounded repository reads",
+      "variant": "emphasis",
+      "labelAt": [1165, 344]
+    },
+    {
+      "from": "worker",
+      "to": "capability_adapter",
+      "label": "authenticated tool call",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[520, 610], [1035, 610]],
+      "labelAt": [780, 628]
+    },
+    {
+      "from": "worker",
+      "to": "deploy_executor",
+      "label": "approved immutable SHA",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "bottom",
+      "via": [[520, 660], [1280, 660]],
+      "labelAt": [1110, 680]
+    },
+    {
+      "from": "deploy_executor",
+      "to": "github",
+      "label": "git clone exact SHA",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "bottom",
+      "route": "straight",
+      "labelAt": [1280, 410]
+    },
+    {
+      "from": "users",
+      "to": "cloudflare_tunnel",
+      "label": "HTTPS /ops + Basic Auth",
+      "variant": "security",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [[85, 30], [780, 30]],
+      "labelAt": [690, 48]
+    },
+    {
+      "from": "cloudflare_tunnel",
+      "to": "observability",
+      "label": "127.0.0.1:8791",
+      "variant": "security",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "route": "straight",
+      "labelAt": [780, 410]
+    },
+    {
+      "from": "observability",
+      "to": "hermes",
+      "label": "allowlisted Docker + systemd telemetry",
+      "variant": "dashed",
+      "fromSide": "right",
+      "toSide": "bottom",
+      "via": [[910, 511], [910, 410], [1030, 410]],
+      "labelAt": [1040, 448]
+    }
+  ]
+}
